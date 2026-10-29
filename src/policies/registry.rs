@@ -5,9 +5,8 @@
 /// All subsequent workers of the same model use the established policy.
 /// When the last worker of a model is removed, the policy mapping is cleaned up.
 use super::{
-    CacheAwareConfig, CacheAwarePolicy, ConsistentHashPolicy, CostParams, KvAwarePolicy,
-    LoadBalancingPolicy, PowerOfTwoPolicy, RandomPolicy, RendezvousHashPolicy, RoundRobinPolicy,
-    TransferCredits,
+    CacheAwarePolicy, ConsistentHashPolicy, KvAwarePolicy, LoadBalancingPolicy, PowerOfTwoPolicy,
+    RandomPolicy, RendezvousHashPolicy, RoundRobinPolicy,
 };
 use crate::config::types::PolicyConfig;
 use std::collections::HashMap;
@@ -175,6 +174,10 @@ impl PolicyRegistry {
             "kv_aware" => Arc::new(KvAwarePolicy::default()),
             "power_of_two" => Arc::new(PowerOfTwoPolicy::new()),
             "rendezvous_hash" => Arc::new(RendezvousHashPolicy::new()),
+            "prefill_bucket" => super::PolicyFactory::create_by_name("prefill_bucket")
+                .expect("prefill_bucket policy"),
+            "decode_kv_cost" => super::PolicyFactory::create_by_name("decode_kv_cost")
+                .expect("decode_kv_cost policy"),
             _ => {
                 warn!("Unknown policy type '{}', using default", policy_type);
                 Arc::clone(&self.default_policy)
@@ -184,44 +187,7 @@ impl PolicyRegistry {
 
     /// Create a policy from a PolicyConfig
     fn create_policy_from_config(config: &PolicyConfig) -> Arc<dyn LoadBalancingPolicy> {
-        match config {
-            PolicyConfig::RoundRobin => Arc::new(RoundRobinPolicy::new()),
-            PolicyConfig::Random => Arc::new(RandomPolicy::new()),
-            PolicyConfig::CacheAware {
-                cache_threshold,
-                balance_abs_threshold,
-                balance_rel_threshold,
-                eviction_interval_secs,
-                max_tree_size,
-            } => {
-                let cache_config = CacheAwareConfig {
-                    cache_threshold: *cache_threshold,
-                    balance_abs_threshold: *balance_abs_threshold,
-                    balance_rel_threshold: *balance_rel_threshold,
-                    eviction_interval_secs: *eviction_interval_secs,
-                    max_tree_size: *max_tree_size,
-                };
-                Arc::new(CacheAwarePolicy::with_config(cache_config))
-            }
-            PolicyConfig::KvAware {
-                router_temperature,
-                kv_penalty_host,
-                kv_penalty_external,
-                kv_penalty_disk,
-            } => Arc::new(KvAwarePolicy::new(CostParams {
-                router_temperature: *router_temperature,
-                transfer_credits: TransferCredits {
-                    device: 1.0,
-                    host_pinned: *kv_penalty_host,
-                    external: *kv_penalty_external,
-                    disk: *kv_penalty_disk,
-                },
-                ..CostParams::default()
-            })),
-            PolicyConfig::PowerOfTwo { .. } => Arc::new(PowerOfTwoPolicy::new()),
-            PolicyConfig::ConsistentHash { .. } => Arc::new(ConsistentHashPolicy::new()),
-            PolicyConfig::RendezvousHash => Arc::new(RendezvousHashPolicy::new()),
-        }
+        super::PolicyFactory::create_from_config(config)
     }
 
     /// Get current model->policy mappings (for debugging/monitoring)

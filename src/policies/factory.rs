@@ -1,9 +1,9 @@
 //! Factory for creating load balancing policies
 
 use super::{
-    CacheAwareConfig, CacheAwarePolicy, ConsistentHashPolicy, CostParams, KvAwarePolicy,
-    LoadBalancingPolicy, PowerOfTwoPolicy, RandomPolicy, RendezvousHashPolicy, RoundRobinPolicy,
-    TransferCredits,
+    CacheAwareConfig, CacheAwarePolicy, ConsistentHashPolicy, CostParams, DecodeKvCostConfig,
+    DecodeKvCostPolicy, KvAwarePolicy, LoadBalancingPolicy, PowerOfTwoPolicy, PrefillBucketConfig,
+    PrefillBucketPolicy, RandomPolicy, RendezvousHashPolicy, RoundRobinPolicy, TransferCredits,
 };
 use crate::config::PolicyConfig;
 use std::sync::Arc;
@@ -55,6 +55,46 @@ impl PolicyFactory {
                 Arc::new(ConsistentHashPolicy::new())
             }
             PolicyConfig::RendezvousHash => Arc::new(RendezvousHashPolicy::new()),
+            PolicyConfig::PrefillBucket {
+                bucket_max_tokens,
+                spill_abs,
+                spill_rel,
+                worker_buckets,
+                tokens_per_byte,
+            } => Arc::new(PrefillBucketPolicy::new(PrefillBucketConfig {
+                bucket_max_tokens: bucket_max_tokens.clone(),
+                spill_abs: *spill_abs,
+                spill_rel: *spill_rel,
+                worker_buckets: worker_buckets.clone(),
+                tokens_per_byte: *tokens_per_byte,
+            })),
+            PolicyConfig::DecodeKvCost {
+                reject_usage,
+                reject_waiting,
+                running_ref,
+                length_ref,
+                default_output_tokens,
+                output_cap,
+                weight_usage,
+                weight_queue,
+                weight_admission,
+                tokens_per_byte,
+                stale_after_secs,
+                capacity_tokens,
+            } => Arc::new(DecodeKvCostPolicy::new(DecodeKvCostConfig {
+                reject_usage: *reject_usage,
+                reject_waiting: *reject_waiting,
+                running_ref: *running_ref,
+                length_ref: *length_ref,
+                default_output_tokens: *default_output_tokens,
+                output_cap: *output_cap,
+                weight_usage: *weight_usage,
+                weight_queue: *weight_queue,
+                weight_admission: *weight_admission,
+                tokens_per_byte: *tokens_per_byte,
+                stale_after: std::time::Duration::from_secs(*stale_after_secs),
+                capacity_tokens: *capacity_tokens,
+            })),
         }
     }
 
@@ -68,6 +108,12 @@ impl PolicyFactory {
             "kv_aware" | "kvaware" => Some(Arc::new(KvAwarePolicy::default())),
             "consistent_hash" | "consistenthash" => Some(Arc::new(ConsistentHashPolicy::new())),
             "rendezvous_hash" | "rendezvoushash" => Some(Arc::new(RendezvousHashPolicy::new())),
+            "prefill_bucket" | "prefillbucket" => Some(Arc::new(PrefillBucketPolicy::new(
+                PrefillBucketConfig::default(),
+            ))),
+            "decode_kv_cost" | "decodekvcost" => Some(Arc::new(DecodeKvCostPolicy::new(
+                DecodeKvCostConfig::default(),
+            ))),
             _ => None,
         }
     }

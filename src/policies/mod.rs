@@ -10,10 +10,13 @@ use std::sync::Arc;
 
 mod cache_aware;
 mod consistent_hash;
+mod decode_kv_cost;
 mod factory;
 pub(crate) mod hash_key;
 mod kv_aware;
 mod power_of_two;
+mod prefill_bucket;
+mod prompt_len;
 mod random;
 mod registry;
 mod rendezvous_hash;
@@ -22,6 +25,10 @@ mod round_robin;
 pub use cache_aware::{CacheAwareCandidate, CacheAwarePlacement, CacheAwarePolicy};
 pub use consistent_hash::ConsistentHashPolicy;
 pub use consistent_hash::VIRTUAL_NODES_PER_WORKER;
+pub use decode_kv_cost::{
+    decode_worker_cost, select_decode_worker, spawn_decode_metrics_poller, DecodeKvCostConfig,
+    DecodeKvCostPolicy, DecodeMetricsInbox, DecodeObservation, DecodeWorkerView,
+};
 pub use factory::PolicyFactory;
 pub use kv_aware::{
     cost_components, kv_aware_ops, CandidateView, CostComponents, CostDecision, CostParams,
@@ -30,6 +37,9 @@ pub use kv_aware::{
     TemperaturePicker, TieredMatchProvider, TransferCredits,
 };
 pub use power_of_two::PowerOfTwoPolicy;
+pub use prefill_bucket::{
+    select_prefill_worker, PrefillBucketConfig, PrefillBucketPolicy, PrefillWorkerView,
+};
 pub use random::RandomPolicy;
 pub use registry::PolicyRegistry;
 pub use rendezvous_hash::RendezvousHashPolicy;
@@ -145,6 +155,11 @@ pub trait LoadBalancingPolicy: Send + Sync + Debug {
     /// Default is no-op for stateless policies like round-robin.
     fn init_workers(&self, _workers: &[Arc<dyn Worker>]) {
         // Default: no-op for policies that don't need initialization
+    }
+
+    /// Shared decode metrics inbox, when this policy scores live KV pressure.
+    fn metrics_inbox(&self) -> Option<Arc<DecodeMetricsInbox>> {
+        None
     }
 }
 

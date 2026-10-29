@@ -439,6 +439,115 @@ impl ConfigValidator {
             PolicyConfig::RendezvousHash => {
                 // No specific validation needed
             }
+            PolicyConfig::PrefillBucket {
+                bucket_max_tokens,
+                spill_abs: _,
+                spill_rel,
+                worker_buckets,
+                tokens_per_byte,
+            } => {
+                if bucket_max_tokens.is_empty() {
+                    return Err(ConfigError::InvalidValue {
+                        field: "bucket_max_tokens".to_string(),
+                        value: "[]".to_string(),
+                        reason: "At least one finite prefill bucket ceiling is required"
+                            .to_string(),
+                    });
+                }
+                let mut previous = 0usize;
+                for ceiling in bucket_max_tokens {
+                    if *ceiling <= previous {
+                        return Err(ConfigError::InvalidValue {
+                            field: "bucket_max_tokens".to_string(),
+                            value: ceiling.to_string(),
+                            reason: "Ceilings must be strictly increasing and start above 0"
+                                .to_string(),
+                        });
+                    }
+                    previous = *ceiling;
+                }
+                if *spill_rel < 1.0 {
+                    return Err(ConfigError::InvalidValue {
+                        field: "spill_rel".to_string(),
+                        value: spill_rel.to_string(),
+                        reason: "Must be >= 1.0".to_string(),
+                    });
+                }
+                if !tokens_per_byte.is_finite() || *tokens_per_byte <= 0.0 {
+                    return Err(ConfigError::InvalidValue {
+                        field: "tokens_per_byte".to_string(),
+                        value: tokens_per_byte.to_string(),
+                        reason: "Must be finite and > 0".to_string(),
+                    });
+                }
+                let bucket_count = bucket_max_tokens.len() + 1;
+                if let Some((url, index)) = worker_buckets
+                    .iter()
+                    .find(|(_, index)| **index >= bucket_count)
+                {
+                    return Err(ConfigError::InvalidValue {
+                        field: "worker_buckets".to_string(),
+                        value: format!("{url}={index}"),
+                        reason: format!("Bucket index must be < {bucket_count}"),
+                    });
+                }
+            }
+            PolicyConfig::DecodeKvCost {
+                reject_usage,
+                reject_waiting: _,
+                running_ref,
+                length_ref,
+                default_output_tokens,
+                output_cap,
+                weight_usage,
+                weight_queue,
+                weight_admission,
+                tokens_per_byte,
+                stale_after_secs,
+                capacity_tokens,
+            } => {
+                if !(0.0..=1.0).contains(reject_usage) {
+                    return Err(ConfigError::InvalidValue {
+                        field: "reject_usage".to_string(),
+                        value: reject_usage.to_string(),
+                        reason: "Must be between 0.0 and 1.0".to_string(),
+                    });
+                }
+                for (field, value) in [
+                    ("running_ref", running_ref),
+                    ("length_ref", length_ref),
+                    ("weight_usage", weight_usage),
+                    ("weight_queue", weight_queue),
+                    ("weight_admission", weight_admission),
+                    ("tokens_per_byte", tokens_per_byte),
+                ] {
+                    if !value.is_finite() || *value <= 0.0 {
+                        return Err(ConfigError::InvalidValue {
+                            field: field.to_string(),
+                            value: value.to_string(),
+                            reason: "Must be finite and > 0".to_string(),
+                        });
+                    }
+                }
+                if *default_output_tokens == 0 || *output_cap == 0 || *stale_after_secs == 0 {
+                    return Err(ConfigError::InvalidValue {
+                        field: "decode_kv_cost".to_string(),
+                        value: format!(
+                            "output={default_output_tokens}, cap={output_cap}, stale={stale_after_secs}"
+                        ),
+                        reason: "Output allowance, cap, and stale interval must be > 0".to_string(),
+                    });
+                }
+                if let Some(capacity) = capacity_tokens {
+                    if *capacity == 0 {
+                        return Err(ConfigError::InvalidValue {
+                            field: "capacity_tokens".to_string(),
+                            value: capacity.to_string(),
+                            reason: "Must be > 0 when set".to_string(),
+                        });
+                    }
+                }
+            }
         }
         Ok(())
     }

@@ -9,7 +9,7 @@ use crate::config::KvConnector;
 use crate::core::{BasicWorker, Worker, WorkerType};
 use crate::metrics::RouterMetrics;
 use crate::otel_http::{self, ClientRequestOptions};
-use crate::policies::PolicyRegistry;
+use crate::policies::{LoadBalancingPolicy, PolicyRegistry};
 use crate::routers::{header_utils, RouterTrait, WorkerManagement};
 use async_trait::async_trait;
 use axum::{
@@ -1974,6 +1974,35 @@ impl VllmPDRouter {
         .map_err(|message| PDRouterError::NetworkError { message })
     }
 
+    fn start_decode_metrics_poll(
+        registry: &crate::policies::PolicyRegistry,
+        client: &reqwest::Client,
+        pd_router: &PdRouterBase,
+    ) {
+        let Some(inbox) = registry.get_decode_policy().metrics_inbox() else {
+            return;
+        };
+        let urls: Vec<String> = pd_router
+            .worker_registry
+            .get_decode_workers()
+            .iter()
+            .map(|worker| worker.url().to_string())
+            .collect();
+        if urls.is_empty() {
+            warn!(
+                "decode_kv_cost has no static decode workers to poll; selection uses local in-flight load"
+            );
+            return;
+        }
+        info!("Polling decode KV metrics for {} workers", urls.len());
+        crate::policies::spawn_decode_metrics_poller(
+            client.clone(),
+            urls,
+            inbox,
+            std::time::Duration::from_secs(1),
+        );
+    }
+
     /// Create a new vLLM PD router
     /// Supports two modes:
     /// 1. Discovery mode: discovery_address is Some, prefill_urls and decode_urls are empty
@@ -2013,6 +2042,8 @@ impl VllmPDRouter {
                 "VllmPDRouter created successfully with pure service discovery, kv_connector={:?}",
                 kv_connector
             );
+
+            Self::start_decode_metrics_poll(&ctx.policy_registry, &http_client, &pd_router);
 
             Ok(Self {
                 epd: ctx
@@ -2108,6 +2139,8 @@ impl VllmPDRouter {
                 }
                 info!("Mooncake bootstrap query complete for all prefill nodes");
             }
+
+            Self::start_decode_metrics_poll(&ctx.policy_registry, &http_client, &pd_router);
 
             Ok(Self {
                 epd: ctx

@@ -703,6 +703,52 @@ pub enum PolicyConfig {
 
     #[serde(rename = "rendezvous_hash")]
     RendezvousHash,
+
+    /// Prefill workers grouped by a prompt-length ceiling. The last bucket is open-ended.
+    #[serde(rename = "prefill_bucket")]
+    PrefillBucket {
+        /// Finite ceilings in ascending token order. A final open bucket is implied.
+        #[serde(default = "default_prefill_bucket_max_tokens")]
+        bucket_max_tokens: Vec<usize>,
+        #[serde(default = "default_prefill_spill_abs")]
+        spill_abs: usize,
+        #[serde(default = "default_prefill_spill_rel")]
+        spill_rel: f32,
+        /// Worker URL to bucket index. URLs absent from the map sit in the open bucket.
+        #[serde(default)]
+        worker_buckets: HashMap<String, usize>,
+        #[serde(default = "default_tokens_per_byte")]
+        tokens_per_byte: f64,
+    },
+
+    /// Decode selection from KV usage, running/waiting depth, and incoming length.
+    #[serde(rename = "decode_kv_cost")]
+    DecodeKvCost {
+        #[serde(default = "default_decode_reject_usage")]
+        reject_usage: f64,
+        #[serde(default = "default_decode_reject_waiting")]
+        reject_waiting: usize,
+        #[serde(default = "default_decode_running_ref")]
+        running_ref: f64,
+        #[serde(default = "default_decode_length_ref")]
+        length_ref: f64,
+        #[serde(default = "default_decode_output_tokens")]
+        default_output_tokens: usize,
+        #[serde(default = "default_decode_output_cap")]
+        output_cap: usize,
+        #[serde(default = "default_decode_weight_usage")]
+        weight_usage: f64,
+        #[serde(default = "default_decode_weight_queue")]
+        weight_queue: f64,
+        #[serde(default = "default_decode_weight_admission")]
+        weight_admission: f64,
+        #[serde(default = "default_tokens_per_byte")]
+        tokens_per_byte: f64,
+        #[serde(default = "default_decode_stale_after_secs")]
+        stale_after_secs: u64,
+        #[serde(default)]
+        capacity_tokens: Option<usize>,
+    },
 }
 
 impl PolicyConfig {
@@ -715,8 +761,66 @@ impl PolicyConfig {
             PolicyConfig::PowerOfTwo { .. } => "power_of_two",
             PolicyConfig::ConsistentHash { .. } => "consistent_hash",
             PolicyConfig::RendezvousHash => "rendezvous_hash",
+            PolicyConfig::PrefillBucket { .. } => "prefill_bucket",
+            PolicyConfig::DecodeKvCost { .. } => "decode_kv_cost",
         }
     }
+}
+
+fn default_prefill_bucket_max_tokens() -> Vec<usize> {
+    vec![2048, 8192, 32768]
+}
+
+fn default_prefill_spill_abs() -> usize {
+    8
+}
+
+fn default_prefill_spill_rel() -> f32 {
+    1.5
+}
+
+fn default_tokens_per_byte() -> f64 {
+    0.25
+}
+
+fn default_decode_reject_usage() -> f64 {
+    0.92
+}
+
+fn default_decode_reject_waiting() -> usize {
+    8
+}
+
+fn default_decode_running_ref() -> f64 {
+    16.0
+}
+
+fn default_decode_length_ref() -> f64 {
+    4096.0
+}
+
+fn default_decode_output_tokens() -> usize {
+    256
+}
+
+fn default_decode_output_cap() -> usize {
+    4096
+}
+
+fn default_decode_weight_usage() -> f64 {
+    1.0
+}
+
+fn default_decode_weight_queue() -> f64 {
+    0.35
+}
+
+fn default_decode_weight_admission() -> f64 {
+    0.50
+}
+
+fn default_decode_stale_after_secs() -> u64 {
+    3
 }
 
 fn default_kv_penalty_host() -> f64 {

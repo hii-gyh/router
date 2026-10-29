@@ -120,7 +120,7 @@ struct CliArgs {
     worker_urls: Vec<String>,
 
     /// Load balancing policy to use. kv_aware is supported only in regular mode, not PD disaggregation.
-    #[arg(long, default_value = "cache_aware", value_parser = ["random", "round_robin", "cache_aware", "kv_aware", "power_of_two", "consistent_hash", "rendezvous_hash"])]
+    #[arg(long, default_value = "cache_aware", value_parser = ["random", "round_robin", "cache_aware", "kv_aware", "power_of_two", "consistent_hash", "rendezvous_hash", "prefill_bucket", "decode_kv_cost"])]
     policy: String,
 
     /// Enable Program-level scheduling independently of the request-level
@@ -147,11 +147,11 @@ struct CliArgs {
     decode: Vec<String>,
 
     /// Specific policy for prefill nodes in PD mode. kv_aware is not supported in PD mode.
-    #[arg(long, value_parser = ["random", "round_robin", "cache_aware", "power_of_two", "consistent_hash", "rendezvous_hash"])]
+    #[arg(long, value_parser = ["random", "round_robin", "cache_aware", "power_of_two", "consistent_hash", "rendezvous_hash", "prefill_bucket", "decode_kv_cost"])]
     prefill_policy: Option<String>,
 
     /// Specific policy for decode nodes in PD mode. kv_aware is not supported in PD mode.
-    #[arg(long, value_parser = ["random", "round_robin", "cache_aware", "power_of_two", "consistent_hash", "rendezvous_hash"])]
+    #[arg(long, value_parser = ["random", "round_robin", "cache_aware", "power_of_two", "consistent_hash", "rendezvous_hash", "prefill_bucket", "decode_kv_cost"])]
     decode_policy: Option<String>,
 
     /// Timeout in seconds for worker startup
@@ -389,6 +389,22 @@ struct CliArgs {
     #[arg(long, default_value_t = false)]
     profile: bool,
 
+    /// Finite prefill length ceilings, in tokens. An open bucket is added after the last value.
+    #[arg(long, value_delimiter = ',')]
+    prefill_bucket_max_tokens: Vec<usize>,
+
+    /// In-flight count at which a prefill bucket may spill into the next larger bucket.
+    #[arg(long, default_value_t = 8)]
+    prefill_spill_abs: usize,
+
+    /// A bucket spills only when its lightest worker is this many times busier than the next bucket.
+    #[arg(long, default_value_t = 1.5)]
+    prefill_spill_rel: f32,
+
+    /// Static prefill bucket membership, repeated as `url=index`.
+    #[arg(long, action = ArgAction::Append)]
+    prefill_bucket_worker: Vec<String>,
+
     /// KV connector type for PD disaggregation (nixl or mooncake)
     #[arg(long, value_enum, default_value_t = KvConnector::Nixl)]
     kv_connector: KvConnector,
@@ -433,7 +449,49 @@ impl CliArgs {
                 virtual_nodes: 160, // Default value
             },
             "rendezvous_hash" => PolicyConfig::RendezvousHash,
+            "prefill_bucket" => self.prefill_bucket_policy(),
+            "decode_kv_cost" => self.decode_kv_cost_policy(),
             _ => PolicyConfig::RoundRobin, // Fallback
+        }
+    }
+
+    fn prefill_bucket_policy(&self) -> PolicyConfig {
+        let bucket_max_tokens = if self.prefill_bucket_max_tokens.is_empty() {
+            vec![2048, 8192, 32768]
+        } else {
+            self.prefill_bucket_max_tokens.clone()
+        };
+        let mut worker_buckets = HashMap::new();
+        for item in &self.prefill_bucket_worker {
+            if let Some((url, index)) = item.split_once('=') {
+                if let Ok(index) = index.parse::<usize>() {
+                    worker_buckets.insert(url.to_string(), index);
+                }
+            }
+        }
+        PolicyConfig::PrefillBucket {
+            bucket_max_tokens,
+            spill_abs: self.prefill_spill_abs,
+            spill_rel: self.prefill_spill_rel,
+            worker_buckets,
+            tokens_per_byte: 0.25,
+        }
+    }
+
+    fn decode_kv_cost_policy(&self) -> PolicyConfig {
+        PolicyConfig::DecodeKvCost {
+            reject_usage: 0.92,
+            reject_waiting: 8,
+            running_ref: 16.0,
+            length_ref: 4096.0,
+            default_output_tokens: 256,
+            output_cap: 4096,
+            weight_usage: 1.0,
+            weight_queue: 0.35,
+            weight_admission: 0.50,
+            tokens_per_byte: 0.25,
+            stale_after_secs: 3,
+            capacity_tokens: None,
         }
     }
 
@@ -442,6 +500,16 @@ impl CliArgs {
         &self,
         prefill_urls: Vec<(String, Option<u16>)>,
     ) -> ConfigResult<RouterConfig> {
+        for item in &self.prefill_bucket_worker {
+            match item.split_once('=') {
+                Some((url, index)) if !url.is_empty() && index.parse::<usize>().is_ok() => {}
+                _ => {
+                    return Err(ConfigError::ValidationFailed {
+                        reason: format!("--prefill-bucket-worker must be url=index, got '{item}'"),
+                    });
+                }
+            }
+        }
         // Determine routing mode
         let mode = if self.enable_igw {
             // IGW mode - routing mode is not used in IGW, but we need to provide a placeholder
