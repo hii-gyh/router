@@ -5,12 +5,13 @@
 /// All subsequent workers of the same model use the established policy.
 /// When the last worker of a model is removed, the policy mapping is cleaned up.
 use super::{
-    CacheAwarePolicy, ConsistentHashPolicy, KvAwarePolicy, LoadBalancingPolicy, PowerOfTwoPolicy,
+    CacheAwarePolicy, KvAffinityTable, KvAwarePolicy, LoadBalancingPolicy, PowerOfTwoPolicy,
     RandomPolicy, RendezvousHashPolicy, RoundRobinPolicy,
 };
 use crate::config::types::PolicyConfig;
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
+use std::time::Duration;
 use tracing::{debug, info, warn};
 
 /// Registry for managing model-to-policy mappings
@@ -30,12 +31,26 @@ pub struct PolicyRegistry {
 
     /// Decode policy for PD mode
     decode_policy: Arc<RwLock<Option<Arc<dyn LoadBalancingPolicy>>>>,
+
+    /// Affinity table shared by every KV-aware policy this registry creates,
+    /// bounding affinity state across models.
+    kv_affinity_table: Arc<KvAffinityTable>,
 }
 
 impl PolicyRegistry {
     /// Create a new PolicyRegistry with a default policy
     pub fn new(default_policy_config: PolicyConfig) -> Self {
-        let default_policy = Self::create_policy_from_config(&default_policy_config);
+        Self::new_with_affinity_ttl(default_policy_config, None)
+    }
+
+    /// Create a policy registry with an optional idle TTL for KV-aware affinity.
+    pub fn new_with_affinity_ttl(
+        default_policy_config: PolicyConfig,
+        affinity_ttl: Option<Duration>,
+    ) -> Self {
+        let kv_affinity_table = Arc::new(KvAffinityTable::with_ttl(affinity_ttl));
+        let default_policy =
+            Self::create_policy_from_config(&default_policy_config, &kv_affinity_table);
 
         Self {
             model_policies: Arc::new(RwLock::new(HashMap::new())),
@@ -43,6 +58,7 @@ impl PolicyRegistry {
             default_policy,
             prefill_policy: Arc::new(RwLock::new(None)),
             decode_policy: Arc::new(RwLock::new(None)),
+            kv_affinity_table,
         }
     }
 
@@ -142,6 +158,13 @@ impl PolicyRegistry {
         Arc::clone(&self.default_policy)
     }
 
+    /// The registry-owned KV affinity table. Its idle TTL carries the
+    /// router-level session-affinity setting; policies created outside this
+    /// registry must share this table or their affinity gate stays closed.
+    pub fn kv_affinity_table(&self) -> Arc<KvAffinityTable> {
+        Arc::clone(&self.kv_affinity_table)
+    }
+
     /// Get policy for a model, or default if not found
     pub fn get_policy_or_default(&self, model_id: &str) -> Arc<dyn LoadBalancingPolicy> {
         self.get_policy(model_id)
@@ -171,7 +194,9 @@ impl PolicyRegistry {
             "round_robin" => Arc::new(RoundRobinPolicy::new()),
             "random" => Arc::new(RandomPolicy::new()),
             "cache_aware" => Arc::new(CacheAwarePolicy::new()),
-            "kv_aware" => Arc::new(KvAwarePolicy::default()),
+            "kv_aware" => Arc::new(
+                KvAwarePolicy::default().with_shared_affinity(Arc::clone(&self.kv_affinity_table)),
+            ),
             "power_of_two" => Arc::new(PowerOfTwoPolicy::new()),
             "rendezvous_hash" => Arc::new(RendezvousHashPolicy::new()),
             "prefill_bucket" => super::PolicyFactory::create_by_name("prefill_bucket")
@@ -185,9 +210,15 @@ impl PolicyRegistry {
         }
     }
 
-    /// Create a policy from a PolicyConfig
-    fn create_policy_from_config(config: &PolicyConfig) -> Arc<dyn LoadBalancingPolicy> {
-        super::PolicyFactory::create_from_config(config)
+    /// Create a policy from a PolicyConfig.
+    ///
+    /// The affinity table is the registry-owned one. Factory construction keeps
+    /// length policies and KV-aware session affinity on the same path.
+    fn create_policy_from_config(
+        config: &PolicyConfig,
+        kv_affinity_table: &Arc<KvAffinityTable>,
+    ) -> Arc<dyn LoadBalancingPolicy> {
+        super::PolicyFactory::create_from_config(config, Some(kv_affinity_table))
     }
 
     /// Get current model->policy mappings (for debugging/monitoring)
@@ -204,12 +235,14 @@ impl PolicyRegistry {
         self.model_worker_counts.read().unwrap().clone()
     }
 
-    /// Clear all policies (useful for testing)
+    /// Clear all policies (useful for testing). Policy rebuilds also drop
+    /// every affinity binding recorded against the old policy set.
     pub fn clear(&self) {
         let mut policies = self.model_policies.write().unwrap();
         policies.clear();
         let mut counts = self.model_worker_counts.write().unwrap();
         counts.clear();
+        self.kv_affinity_table.clear();
     }
 
     /// Set the prefill policy for PD mode
@@ -233,7 +266,7 @@ impl PolicyRegistry {
             .unwrap_or_else(|| self.get_default_policy())
     }
 
-    /// Get the decode policy for PD mode, or default if not set
+    /// Get the decode override, or the main policy when no override is set.
     pub fn get_decode_policy(&self) -> Arc<dyn LoadBalancingPolicy> {
         let decode_policy = self.decode_policy.read().unwrap();
         decode_policy
@@ -253,7 +286,7 @@ impl std::fmt::Debug for PolicyRegistry {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "cpu", feature = "ready"))]
 mod tests {
     use super::*;
 

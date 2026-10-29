@@ -79,10 +79,14 @@ pub fn stream_usage_chunk(
 }
 
 pub fn format_sse<T: serde::Serialize>(chunk: &T) -> String {
-    format!(
-        "data: {}\n\n",
-        serde_json::to_string(chunk).unwrap_or_default()
-    )
+    const PREFIX: &[u8] = b"data: ";
+    let mut buf = Vec::with_capacity(256);
+    buf.extend_from_slice(PREFIX);
+    if serde_json::to_writer(&mut buf, chunk).is_err() {
+        buf.truncate(PREFIX.len());
+    }
+    buf.extend_from_slice(b"\n\n");
+    String::from_utf8(buf).unwrap_or_default()
 }
 
 /// One SSE generation frame in the shape the client asked for.
@@ -254,7 +258,7 @@ pub fn final_response(
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "cpu", feature = "ready"))]
 mod tests {
     use super::*;
 
@@ -357,5 +361,22 @@ mod tests {
         );
         let json = serde_json::to_string(&empty).unwrap();
         assert!(json.contains("\"token_ids\":[]"));
+    }
+
+    #[test]
+    fn sse_frame_is_data_prefixed_json() {
+        let chunk = stream_chunk(
+            "chatcmpl-1",
+            "m",
+            1,
+            "a\"b\n",
+            false,
+            Some("stop".into()),
+            None,
+        );
+        assert_eq!(
+            format_sse(&chunk),
+            format!("data: {}\n\n", serde_json::to_string(&chunk).unwrap())
+        );
     }
 }

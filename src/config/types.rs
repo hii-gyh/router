@@ -16,6 +16,10 @@ pub struct RouterConfig {
     pub epd: Option<EpdConfig>,
     /// Routing mode configuration
     pub mode: RoutingMode,
+    /// Statically configured KV event sources, keyed by prefill base URL.
+    /// Workers listed here skip HTTP control-plane discovery and probing.
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub pd_kv_event_sources: HashMap<String, PdKvEventSources>,
     /// Worker connection mode
     #[serde(default)]
     pub connection_mode: ConnectionMode,
@@ -71,6 +75,11 @@ pub struct RouterConfig {
     /// Disable circuit breaker (overrides circuit_breaker.failure_threshold to u32::MAX when true)
     #[serde(default)]
     pub disable_circuit_breaker: bool,
+    /// Enable stable-identity affinity in `kv_aware` and expire idle bindings after this TTL.
+    /// P/D binds decode only, yielding above the decode pool's rounded-up request mean.
+    /// `None` disables affinity.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kv_aware_session_affinity_ttl_secs: Option<u64>,
     /// Health check configuration
     pub health_check: HealthCheckConfig,
     /// Enable Inference Gateway mode (false = proxy mode, true = IGW mode)
@@ -120,8 +129,49 @@ fn default_intra_node_data_parallel_size() -> usize {
 /// This is intentionally separate from request-level `PolicyConfig`. The
 /// binding policy is evaluated once for a new Program generation; admission
 /// and resume remain ProgramScheduler decisions.
+/// First rollout of RFC-PD-PROGRAM-SCHEDULING: one-way remote execution.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(default, deny_unknown_fields)]
+pub struct PdProgramSchedulingConfig {
+    pub enabled: bool,
+    /// Event residency is advisory and never authorizes a warm transfer.
+    pub kv_events: bool,
+    pub kv_hash_mode: String,
+    pub max_prefill_requests_per_target: usize,
+    /// Only bounded explicit TTL is supported; otherwise Acting TTL is zero.
+    pub explicit_ttl: bool,
+    /// Treat native D occupancy and Program reservations as overlapping
+    /// observations of the same KV instead of adding them. Enabled by default
+    /// so a Program's KV is not charged twice.
+    pub exclusive_capacity_accounting: bool,
+    /// P KV-cache usage watermark at or above which the Program-count cap
+    /// tightens back to the configured P prefill permit count. This keeps the
+    /// exclusive accounting from over-admitting into a pressured P cache.
+    /// Zero disables the guard.
+    pub prefill_kv_high_watermark: f64,
+    /// P KV-cache sampling window in seconds for the guard above.
+    pub prefill_kv_window_seconds: f64,
+}
+
+impl Default for PdProgramSchedulingConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            kv_events: false,
+            kv_hash_mode: "sha256".to_string(),
+            max_prefill_requests_per_target: 1,
+            explicit_ttl: false,
+            exclusive_capacity_accounting: true,
+            prefill_kv_high_watermark: 0.85,
+            prefill_kv_window_seconds: 10.0,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, PartialEq)]
 pub struct ProgramSchedulingConfig {
+    #[serde(default)]
+    pub pd: PdProgramSchedulingConfig,
     /// Metadata source that opts an individual request into Program scheduling.
     #[serde(
         default,
@@ -264,6 +314,7 @@ impl ProgramSchedulingConfig {
 impl Default for ProgramSchedulingConfig {
     fn default() -> Self {
         Self {
+            pd: PdProgramSchedulingConfig::default(),
             enable_key: ProgramSchedulingEnableKey::default(),
             binding_only: false,
             global_queue: false,
@@ -299,6 +350,8 @@ impl Default for ProgramSchedulingConfig {
 
 #[derive(Deserialize)]
 struct ProgramSchedulingConfigInput {
+    #[serde(default)]
+    pd: PdProgramSchedulingConfig,
     #[serde(
         default,
         rename = "program_scheduling_enable_key",
@@ -435,6 +488,7 @@ impl<'de> Deserialize<'de> for ProgramSchedulingConfig {
         };
 
         Ok(Self {
+            pd: input.pd,
             enable_key: input.enable_key,
             binding_only: input.binding_only,
             global_queue: input.global_queue,
@@ -474,7 +528,9 @@ fn default_program_hash_virtual_nodes() -> u32 {
 }
 
 fn default_program_max_active_programs_per_target() -> usize {
-    64
+    // Zero means auto: two Programs per configured P prefill permit (the
+    // configured proxy for decode slots), clamped to [4, 64].
+    0
 }
 
 fn default_program_metrics_interval_seconds() -> f64 {
@@ -482,7 +538,11 @@ fn default_program_metrics_interval_seconds() -> f64 {
 }
 
 fn default_program_admission_waiting_request_threshold() -> usize {
-    1
+    // Zero means auto: `2 * max_prefill_requests_per_target`, clamped to
+    // [4, 64]. Gating admission on an empty D engine queue moves the queue
+    // from the engine into the Router; admit while the engine queue still has
+    // headroom instead.
+    0
 }
 
 fn default_program_queue_timeout_seconds() -> f64 {
@@ -573,6 +633,30 @@ pub enum ConnectionMode {
     Grpc,
 }
 
+/// Statically configured KV event sources for one prefill worker, used when
+/// the engine's HTTP control plane does not serve `/server_info` or
+/// `/kv_event_sources` (e.g. the `vllm-rs serve` frontend).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct PdKvEventSources {
+    /// ZMQ PUB endpoints, one per data-parallel rank (index = rank).
+    pub endpoints: Vec<String>,
+    /// Optional ZMQ ROUTER (replay) endpoints, same ordering as `endpoints`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub replay_endpoints: Option<Vec<String>>,
+    /// KV cache block size of the engine. Must match the engine's
+    /// `--block-size` (vLLM default: 16).
+    #[serde(default = "default_pd_kv_block_size")]
+    pub block_size: u32,
+    /// Model identity for the cache key. Defaults to the worker URL; the
+    /// served-model check then relies on `/v1/models`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+}
+
+fn default_pd_kv_block_size() -> u32 {
+    16
+}
+
 /// Routing mode configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type")]
@@ -596,7 +680,7 @@ pub enum RoutingMode {
         /// Optional separate policy for prefill workers
         #[serde(skip_serializing_if = "Option::is_none")]
         prefill_policy: Option<PolicyConfig>,
-        /// Optional separate policy for decode workers
+        /// Optional separate policy for decode workers (defaults to the main policy)
         #[serde(skip_serializing_if = "Option::is_none")]
         decode_policy: Option<PolicyConfig>,
         /// ZMQ service discovery address (e.g., "0.0.0.0:30001")
@@ -639,7 +723,7 @@ impl RoutingMode {
     }
 
     /// Get the effective decode policy for PD mode
-    /// Falls back to the main policy if no specific decode policy is set
+    /// Falls back to the main policy if no specific decode policy is set.
     pub fn get_decode_policy<'a>(&'a self, main_policy: &'a PolicyConfig) -> &'a PolicyConfig {
         match self {
             RoutingMode::VllmPrefillDecode { decode_policy, .. } => {
@@ -687,6 +771,10 @@ pub enum PolicyConfig {
         kv_penalty_external: f64,
         #[serde(default = "default_kv_penalty_disk")]
         kv_penalty_disk: f64,
+        /// Optional static KV event sources for workers whose HTTP control
+        /// endpoint does not expose /kv_event_sources.
+        #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+        static_kv_event_sources: Box<HashMap<String, StaticKvEventSources>>,
     },
 
     #[serde(rename = "power_of_two")]
@@ -749,6 +837,20 @@ pub enum PolicyConfig {
         #[serde(default)]
         capacity_tokens: Option<usize>,
     },
+}
+
+/// Manually configured KV event publishers for one regular-mode worker.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct StaticKvEventSources {
+    /// One externally reachable ZMQ PUB endpoint per DP rank.
+    pub endpoints: Vec<String>,
+    /// Optional replay ROUTER endpoint per DP rank for loss recovery.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub replay_endpoints: Option<Vec<String>>,
+    /// KV cache block size used to calculate prefix placement.
+    pub block_size: u32,
+    /// Shared model identity across workers that serve the same model.
+    pub model: String,
 }
 
 impl PolicyConfig {
@@ -1022,6 +1124,7 @@ impl Default for RouterConfig {
             mode: RoutingMode::Regular {
                 worker_urls: vec![],
             },
+            pd_kv_event_sources: HashMap::new(),
             policy: PolicyConfig::Random,
             host: "127.0.0.1".to_string(),
             port: 3001,
@@ -1046,6 +1149,7 @@ impl Default for RouterConfig {
             circuit_breaker: CircuitBreakerConfig::default(),
             disable_retries: false,
             disable_circuit_breaker: false,
+            kv_aware_session_affinity_ttl_secs: None,
             health_check: HealthCheckConfig::default(),
             enable_igw: false,
             connection_mode: ConnectionMode::Http,
@@ -1117,7 +1221,7 @@ impl RouterConfig {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "cpu", feature = "ready"))]
 mod tests {
     use super::*;
 
@@ -1144,6 +1248,20 @@ mod tests {
     }
 
     #[test]
+    fn test_pd_exclusive_capacity_accounting_defaults_and_parses() {
+        let default = ProgramSchedulingConfig::default();
+        assert!(default.pd.exclusive_capacity_accounting);
+        assert_eq!(default.pd.prefill_kv_high_watermark, 0.85);
+        assert_eq!(default.pd.prefill_kv_window_seconds, 10.0);
+
+        let parsed: ProgramSchedulingConfig =
+            serde_json::from_str(r#"{"pd":{"enabled":true,"exclusive_capacity_accounting":true}}"#)
+                .unwrap();
+        assert!(parsed.pd.enabled);
+        assert!(parsed.pd.exclusive_capacity_accounting);
+    }
+
+    #[test]
     fn test_router_config_new() {
         let mode = RoutingMode::Regular {
             worker_urls: vec!["http://worker1".to_string(), "http://worker2".to_string()],
@@ -1165,6 +1283,63 @@ mod tests {
         // Other fields should be default
         assert_eq!(config.host, "127.0.0.1");
         assert_eq!(config.port, 3001);
+    }
+
+    #[test]
+    fn test_pd_kv_event_sources_serde_roundtrip_and_defaults() {
+        let mut config = RouterConfig::new(
+            RoutingMode::VllmPrefillDecode {
+                prefill_urls: vec![("http://prefill:8000".to_string(), None)],
+                decode_urls: vec!["http://decode:8000".to_string()],
+                prefill_policy: None,
+                decode_policy: None,
+                discovery_address: None,
+            },
+            PolicyConfig::KvAware {
+                router_temperature: 0.0,
+                kv_penalty_host: 0.8,
+                kv_penalty_external: 0.6,
+                kv_penalty_disk: 0.4,
+                static_kv_event_sources: Default::default(),
+            },
+        );
+        config.pd_kv_event_sources.insert(
+            "http://prefill:8000".to_string(),
+            PdKvEventSources {
+                endpoints: vec!["tcp://prefill:5557".to_string()],
+                replay_endpoints: Some(vec!["tcp://prefill:5558".to_string()]),
+                block_size: 32,
+                model: Some("m".to_string()),
+            },
+        );
+        let json = serde_json::to_string(&config).unwrap();
+        let deserialized: RouterConfig = serde_json::from_str(&json).unwrap();
+        assert_eq!(
+            deserialized.pd_kv_event_sources["http://prefill:8000"].endpoints,
+            vec!["tcp://prefill:5557".to_string()]
+        );
+        assert_eq!(
+            deserialized.pd_kv_event_sources["http://prefill:8000"].block_size,
+            32
+        );
+
+        // Omitted optional fields default: block_size 16, no replay, no model.
+        let sources: PdKvEventSources =
+            serde_json::from_str(r#"{"endpoints":["tcp://p:5557"]}"#).unwrap();
+        assert_eq!(sources.block_size, 16);
+        assert!(sources.replay_endpoints.is_none());
+        assert!(sources.model.is_none());
+
+        let bare = RouterConfig::new(
+            RoutingMode::Regular {
+                worker_urls: vec![],
+            },
+            PolicyConfig::RoundRobin,
+        );
+        let json = serde_json::to_string(&bare).unwrap();
+        assert!(!json.contains("pd_kv_event_sources"));
+        let empty: RouterConfig = serde_json::from_str(&json).unwrap();
+        assert!(empty.pd_kv_event_sources.is_empty());
     }
 
     #[test]
@@ -1731,6 +1906,7 @@ mod tests {
                 decode_policy: None,
                 discovery_address: None,
             },
+            pd_kv_event_sources: Default::default(),
             policy: PolicyConfig::PowerOfTwo {
                 load_check_interval_secs: 30,
             },
@@ -1761,6 +1937,7 @@ mod tests {
             circuit_breaker: CircuitBreakerConfig::default(),
             disable_retries: false,
             disable_circuit_breaker: false,
+            kv_aware_session_affinity_ttl_secs: None,
             health_check: HealthCheckConfig::default(),
             enable_igw: false,
             queue_size: 100,
@@ -1795,6 +1972,7 @@ mod tests {
                     "http://worker3:8000".to_string(),
                 ],
             },
+            pd_kv_event_sources: Default::default(),
             policy: PolicyConfig::CacheAware {
                 cache_threshold: 0.9,
                 balance_abs_threshold: 5,
@@ -1829,6 +2007,7 @@ mod tests {
             circuit_breaker: CircuitBreakerConfig::default(),
             disable_retries: false,
             disable_circuit_breaker: false,
+            kv_aware_session_affinity_ttl_secs: None,
             health_check: HealthCheckConfig::default(),
             enable_igw: false,
             queue_size: 100,
@@ -1860,6 +2039,7 @@ mod tests {
             mode: RoutingMode::Regular {
                 worker_urls: vec!["http://worker1".to_string()],
             },
+            pd_kv_event_sources: Default::default(),
             policy: PolicyConfig::RoundRobin,
             host: "::1".to_string(), // IPv6
             port: 8888,
@@ -1893,6 +2073,7 @@ mod tests {
             circuit_breaker: CircuitBreakerConfig::default(),
             disable_retries: false,
             disable_circuit_breaker: false,
+            kv_aware_session_affinity_ttl_secs: None,
             health_check: HealthCheckConfig::default(),
             enable_igw: false,
             queue_size: 100,
@@ -1960,7 +2141,7 @@ mod tests {
 
     #[test]
     fn test_pd_policy_fallback_only_prefill() {
-        // When only prefill policy is specified, decode should use main policy
+        // When only prefill is overridden, decode inherits the main policy.
         let pd = RoutingMode::VllmPrefillDecode {
             prefill_urls: vec![("http://prefill1".to_string(), None)],
             decode_urls: vec!["http://decode1".to_string()],
@@ -1975,7 +2156,7 @@ mod tests {
             discovery_address: None,
         };
 
-        let main_policy = PolicyConfig::RoundRobin;
+        let main_policy = PolicyConfig::Random;
 
         // Prefill should use specific policy
         match pd.get_prefill_policy(&main_policy) {
@@ -1983,10 +2164,10 @@ mod tests {
             _ => panic!("Expected CacheAware for prefill"),
         }
 
-        // Decode should fall back to main policy
+        // Decode inherits the main policy when no decode override is set.
         match pd.get_decode_policy(&main_policy) {
-            PolicyConfig::RoundRobin => {} // Success
-            _ => panic!("Expected RoundRobin for decode"),
+            PolicyConfig::Random => {}
+            _ => panic!("Expected decode to inherit the main policy"),
         }
     }
 
@@ -2037,7 +2218,7 @@ mod tests {
             max_tree_size: 2000,
         };
 
-        // Both should fall back to main policy
+        // Both stages inherit the main policy.
         match pd.get_prefill_policy(&main_policy) {
             PolicyConfig::CacheAware {
                 cache_threshold, ..

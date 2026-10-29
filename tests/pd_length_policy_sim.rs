@@ -334,6 +334,73 @@ vllm:num_requests_waiting{engine="0"} 1
     assert_eq!(workers[chosen].url(), "http://old:8000");
 }
 
+/// The merge keeps length policies on the same factory path as KV-aware affinity.
+/// A registry-owned table must still open session affinity, and the decode policy
+/// is the only one that exposes a metrics inbox.
+#[test]
+fn registry_keeps_length_policies_and_kv_affinity() {
+    use std::time::Duration;
+    use vllm_router_rs::config::PolicyConfig;
+    use vllm_router_rs::policies::{kv_aware_ops, PolicyFactory, PolicyRegistry};
+
+    let kv_registry = PolicyRegistry::new_with_affinity_ttl(
+        PolicyConfig::KvAware {
+            router_temperature: 0.0,
+            kv_penalty_host: 0.8,
+            kv_penalty_external: 0.6,
+            kv_penalty_disk: 0.3,
+            static_kv_event_sources: Default::default(),
+        },
+        Some(Duration::from_secs(60)),
+    );
+    assert!(kv_aware_ops(kv_registry.get_default_policy().as_ref())
+        .expect("kv_aware policy")
+        .session_affinity_enabled());
+
+    let prefill = PolicyConfig::PrefillBucket {
+        bucket_max_tokens: vec![2048, 8192],
+        spill_abs: 8,
+        spill_rel: 1.5,
+        worker_buckets: HashMap::from([("http://short:8000".to_string(), 0)]),
+        tokens_per_byte: 0.25,
+    };
+    let decode = PolicyConfig::DecodeKvCost {
+        reject_usage: 0.92,
+        reject_waiting: 8,
+        running_ref: 16.0,
+        length_ref: 4096.0,
+        default_output_tokens: 256,
+        output_cap: 4096,
+        weight_usage: 1.0,
+        weight_queue: 0.35,
+        weight_admission: 0.50,
+        tokens_per_byte: 0.25,
+        stale_after_secs: 3,
+        capacity_tokens: None,
+    };
+    let registry = PolicyRegistry::new(PolicyConfig::RoundRobin);
+    let table = registry.kv_affinity_table();
+    registry.set_prefill_policy(PolicyFactory::create_from_config(&prefill, Some(&table)));
+    registry.set_decode_policy(PolicyFactory::create_from_config(&decode, Some(&table)));
+    assert_eq!(registry.get_prefill_policy().name(), "prefill_bucket");
+    assert!(registry.get_prefill_policy().metrics_inbox().is_none());
+    assert_eq!(registry.get_decode_policy().name(), "decode_kv_cost");
+    assert!(registry.get_decode_policy().metrics_inbox().is_some());
+
+    assert_eq!(
+        registry
+            .on_worker_added("length-model", Some("prefill_bucket"))
+            .name(),
+        "prefill_bucket"
+    );
+    assert_eq!(
+        PolicyRegistry::new(PolicyConfig::RoundRobin)
+            .on_worker_added("length-model", Some("decode_kv_cost"))
+            .name(),
+        "decode_kv_cost"
+    );
+}
+
 struct PrefillSim {
     short_mean_wait: f64,
     short_p50_wait: u64,
