@@ -78,12 +78,16 @@ impl PolicyFactory {
                 spill_rel,
                 worker_buckets,
                 tokens_per_byte,
+                preference_weight,
+                hard_partition,
             } => Arc::new(PrefillBucketPolicy::new(PrefillBucketConfig {
                 bucket_max_tokens: bucket_max_tokens.clone(),
                 spill_abs: *spill_abs,
                 spill_rel: *spill_rel,
                 worker_buckets: worker_buckets.clone(),
                 tokens_per_byte: *tokens_per_byte,
+                preference_weight: *preference_weight,
+                hard_partition: *hard_partition,
             })),
             PolicyConfig::DecodeKvCost {
                 reject_usage,

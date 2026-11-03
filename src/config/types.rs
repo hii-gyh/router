@@ -807,6 +807,12 @@ pub enum PolicyConfig {
         worker_buckets: HashMap<String, usize>,
         #[serde(default = "default_tokens_per_byte")]
         tokens_per_byte: f64,
+        /// Soft mode: load-equivalent cost per tier step away from the preferred bucket.
+        #[serde(default = "default_prefill_preference_weight")]
+        preference_weight: f32,
+        /// When true, use hard spill thresholds instead of soft preference.
+        #[serde(default)]
+        hard_partition: bool,
     },
 
     /// Decode selection from KV usage, running/waiting depth, and incoming length.
@@ -879,6 +885,10 @@ fn default_prefill_spill_abs() -> usize {
 
 fn default_prefill_spill_rel() -> f32 {
     1.5
+}
+
+fn default_prefill_preference_weight() -> f32 {
+    2.0
 }
 
 fn default_tokens_per_byte() -> f64 {

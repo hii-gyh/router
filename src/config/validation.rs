@@ -459,6 +459,8 @@ impl ConfigValidator {
                 spill_rel,
                 worker_buckets,
                 tokens_per_byte,
+                preference_weight,
+                hard_partition: _,
             } => {
                 if bucket_max_tokens.is_empty() {
                     return Err(ConfigError::InvalidValue {
@@ -485,6 +487,13 @@ impl ConfigValidator {
                         field: "spill_rel".to_string(),
                         value: spill_rel.to_string(),
                         reason: "Must be >= 1.0".to_string(),
+                    });
+                }
+                if !preference_weight.is_finite() || *preference_weight < 0.0 {
+                    return Err(ConfigError::InvalidValue {
+                        field: "preference_weight".to_string(),
+                        value: preference_weight.to_string(),
+                        reason: "Must be finite and >= 0".to_string(),
                     });
                 }
                 if !tokens_per_byte.is_finite() || *tokens_per_byte <= 0.0 {

@@ -1,8 +1,9 @@
 //! Decode placement by KV pressure, queue depth, and incoming length.
 //!
-//! The pool is not partitioned. Two eligible workers are sampled and the one
-//! with the lower cost is kept. A fresh observation older than three poll
-//! intervals is ignored and the worker is scored from the local in-flight count.
+//! The pool is not partitioned. Eligible workers are scored and the lowest
+//! cost is kept (full-pool min for typical small PD decode sets). A fresh
+//! observation older than three poll intervals is ignored and the worker is
+//! scored from the local in-flight count.
 
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
@@ -156,7 +157,11 @@ pub fn decode_worker_cost(
     } else {
         (local_usage, worker.local_load as f64, 0.0, 0.5)
     };
-    let queue = ((running + waiting) / config.running_ref).min(2.0);
+    // A fresh sample is still up to one poll interval old. Requests dispatched
+    // since it was taken are visible only in the router's in-flight count, so
+    // score against whichever side sees more load.
+    let load = (running + waiting).max(worker.local_load as f64);
+    let queue = (load / config.running_ref).min(2.0);
     let admission = match (worker.fresh, config.capacity_tokens) {
         (true, Some(capacity)) => {
             let free = (capacity as f64 * (1.0 - admission_usage)).max(1.0);
@@ -191,7 +196,10 @@ pub fn select_decode_worker(
     } else {
         eligible
     };
-    Some(power_of_two(&pool, demand_tokens, config, rng).index)
+    // Small decode pools (typical PD topo ≤8) must scan everyone. Power-of-two
+    // only sees two candidates and on 4-way real PD left KV stddev *worse*
+    // than round_robin in ablation A1.
+    Some(lowest_cost(&pool, demand_tokens, config, rng).index)
 }
 
 fn blocked(worker: &DecodeWorkerView, config: &DecodeKvCostConfig) -> bool {
@@ -207,7 +215,7 @@ fn blocked(worker: &DecodeWorkerView, config: &DecodeKvCostConfig) -> bool {
     usage_blocked || waiting_blocked
 }
 
-fn power_of_two<'a>(
+fn lowest_cost<'a>(
     workers: &[&'a DecodeWorkerView],
     demand_tokens: usize,
     config: &DecodeKvCostConfig,
@@ -216,22 +224,30 @@ fn power_of_two<'a>(
     if workers.len() == 1 {
         return workers[0];
     }
-    let left = rng.random_range(0..workers.len());
-    let mut right = rng.random_range(0..workers.len());
-    while right == left {
-        right = rng.random_range(0..workers.len());
-    }
-    let first = workers[left];
-    let second = workers[right];
-    let first_cost = decode_worker_cost(demand_tokens, first, config);
-    let second_cost = decode_worker_cost(demand_tokens, second, config);
-    if first_cost < second_cost
-        || ((first_cost - second_cost).abs() <= f64::EPSILON && first.index <= second.index)
-    {
-        first
-    } else {
-        second
-    }
+    let scored: Vec<(f64, &'a DecodeWorkerView)> = workers
+        .iter()
+        .copied()
+        .map(|worker| (decode_worker_cost(demand_tokens, worker, config), worker))
+        .collect();
+    let best_cost = scored
+        .iter()
+        .map(|(cost, _)| *cost)
+        .fold(f64::INFINITY, f64::min);
+    // Keep every worker within eps of the minimum. Prefer lower in-flight
+    // load among ties (steers between polls), then sample uniformly so an
+    // idle pool does not starve high indices.
+    let mut tied: Vec<&'a DecodeWorkerView> = scored
+        .into_iter()
+        .filter(|(cost, _)| (*cost - best_cost).abs() <= f64::EPSILON)
+        .map(|(_, worker)| worker)
+        .collect();
+    let min_load = tied
+        .iter()
+        .map(|worker| worker.local_load)
+        .min()
+        .unwrap_or(0);
+    tied.retain(|worker| worker.local_load == min_load);
+    tied[rng.random_range(0..tied.len())]
 }
 
 fn dp_engine(worker_url: &str) -> usize {

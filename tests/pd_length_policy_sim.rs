@@ -41,6 +41,8 @@ fn bucket_config(assignments: &[(&str, usize)]) -> PrefillBucketConfig {
         spill_rel: 1.5,
         worker_buckets,
         tokens_per_byte: 0.25,
+        preference_weight: 2.0,
+        hard_partition: false,
     }
 }
 
@@ -116,15 +118,83 @@ fn session_stays_on_the_same_prefill_until_that_worker_is_unavailable() {
 
 #[test]
 fn hot_short_bucket_spills_upward_and_a_similarly_hot_next_bucket_does_not() {
-    let config = bucket_config(&[("s0", 0), ("s1", 0), ("l0", 1)]);
+    let mut config = bucket_config(&[("s0", 0), ("s1", 0), ("l0", 1)]);
     let mut rng = StdRng::seed_from_u64(3);
     let spilling = prefill_views(&[("s0", 10, true), ("s1", 12, true), ("l0", 0, true)]);
-    let spilled = select_prefill_worker(&spilling, 256, Some("s"), &config, &mut rng).unwrap();
-    assert_eq!(spilling[spilled].url, "l0");
+    // Power-of-two samples two of three; over many draws the idle open (cost 2)
+    // must dominate workers at load 10/12 (costs 10/12).
+    let mut open_hits = 0usize;
+    for _ in 0..200 {
+        let pick = select_prefill_worker(&spilling, 256, None, &config, &mut rng).unwrap();
+        if spilling[pick].url == "l0" {
+            open_hits += 1;
+        }
+    }
+    assert!(
+        open_hits >= 100,
+        "soft preference should usually pick idle open, got {open_hits}/200"
+    );
 
-    let held = prefill_views(&[("s0", 10, true), ("s1", 12, true), ("l0", 9, true)]);
+    // Session affinity still pins to the preferred tier while that worker is up.
+    let held = prefill_views(&[("s0", 10, true), ("s1", 12, true), ("l0", 0, true)]);
     let stayed = select_prefill_worker(&held, 256, Some("s"), &config, &mut rng).unwrap();
     assert_ne!(held[stayed].url, "l0");
+
+    // Hard partition keeps the old spill thresholds.
+    config.hard_partition = true;
+    let hard = prefill_views(&[("s0", 10, true), ("s1", 12, true), ("l0", 0, true)]);
+    let hard_pick = select_prefill_worker(&hard, 256, None, &config, &mut rng).unwrap();
+    assert_eq!(hard[hard_pick].url, "l0");
+    let hard_held = prefill_views(&[("s0", 10, true), ("s1", 12, true), ("l0", 9, true)]);
+    let hard_stay = select_prefill_worker(&hard_held, 256, None, &config, &mut rng).unwrap();
+    assert_ne!(hard_held[hard_stay].url, "l0");
+}
+
+#[test]
+fn soft_preference_keeps_idle_shorts_on_the_short_tier() {
+    let config = bucket_config(&[("s0", 0), ("s1", 0), ("l0", 1), ("l1", 1)]);
+    let mut rng = StdRng::seed_from_u64(5);
+    let idle = prefill_views(&[
+        ("s0", 0, true),
+        ("s1", 0, true),
+        ("l0", 0, true),
+        ("l1", 0, true),
+    ]);
+    let mut short_hits = 0usize;
+    for _ in 0..200 {
+        let pick = select_prefill_worker(&idle, 256, None, &config, &mut rng).unwrap();
+        if config.bucket_of_worker(&idle[pick].url) == 0 {
+            short_hits += 1;
+        }
+    }
+    assert!(
+        short_hits >= 180,
+        "idle soft preference should stay on the short tier, got {short_hits}/200"
+    );
+}
+
+#[test]
+fn soft_preference_borrows_open_capacity_before_hard_spill_would() {
+    let config = bucket_config(&[("s0", 0), ("s1", 0), ("l0", 1), ("l1", 1)]);
+    let mut rng = StdRng::seed_from_u64(6);
+    // Preferred load 3 vs idle open: cost 3 vs 2 → open wins under weight 2.
+    let busy = prefill_views(&[
+        ("s0", 3, true),
+        ("s1", 3, true),
+        ("l0", 0, true),
+        ("l1", 0, true),
+    ]);
+    let mut open_hits = 0usize;
+    for _ in 0..100 {
+        let pick = select_prefill_worker(&busy, 256, None, &config, &mut rng).unwrap();
+        if config.bucket_of_worker(&busy[pick].url) == 1 {
+            open_hits += 1;
+        }
+    }
+    assert!(
+        open_hits >= 70,
+        "soft preference should borrow open capacity early, got {open_hits}/100"
+    );
 }
 
 #[test]
@@ -157,6 +227,63 @@ fn decode_gate_skips_a_full_worker_and_uses_it_only_when_every_worker_is_full() 
         select_decode_worker(&both_full, 1024, &config, &mut rng),
         Some(1)
     );
+}
+
+/// With four workers, the unique coolest must always win. Power-of-two only
+/// samples a pair and can miss that worker for long stretches.
+#[test]
+fn four_way_pool_always_picks_the_unique_coolest_worker() {
+    let config = DecodeKvCostConfig::default();
+    let mut rng = StdRng::seed_from_u64(11);
+    let workers = vec![
+        decode_view(0, 0.55, 6, 0, true),
+        decode_view(1, 0.48, 5, 0, true),
+        decode_view(2, 0.52, 4, 0, true),
+        decode_view(3, 0.12, 1, 0, true),
+    ];
+    for _ in 0..200 {
+        assert_eq!(
+            select_decode_worker(&workers, 2048, &config, &mut rng),
+            Some(3)
+        );
+    }
+}
+
+/// An idle pool ties on every cost term. Selection must still reach every
+/// worker: breaking the tie by index gave worker 0 half the traffic and left
+/// the last worker with nothing.
+#[test]
+fn idle_pool_does_not_starve_the_highest_index_worker() {
+    let config = DecodeKvCostConfig::default();
+    let mut rng = StdRng::seed_from_u64(7);
+    let workers: Vec<DecodeWorkerView> = (0..4).map(|index| decode_view(index, 0.0, 0, 0, true)).collect();
+    let mut picks = [0usize; 4];
+    for _ in 0..4_000 {
+        picks[select_decode_worker(&workers, 512, &config, &mut rng).unwrap()] += 1;
+    }
+    for (index, count) in picks.iter().enumerate() {
+        assert!(
+            (800..1200).contains(count),
+            "worker {index} took {count} of 4000 requests, picks={picks:?}"
+        );
+    }
+}
+
+/// Between polls the sample still reads zero, so only the router's in-flight
+/// count can keep arrivals off a worker that was just handed work.
+#[test]
+fn in_flight_requests_steer_away_before_the_next_poll_arrives() {
+    let config = DecodeKvCostConfig::default();
+    let mut rng = StdRng::seed_from_u64(8);
+    let mut workers: Vec<DecodeWorkerView> =
+        (0..2).map(|index| decode_view(index, 0.0, 0, 0, true)).collect();
+    // Worker 0 already holds four dispatches the poller has not observed yet.
+    workers[0].local_load = 4;
+    workers[0].running = Some(0);
+    workers[0].kv_usage = Some(0.0);
+    for _ in 0..50 {
+        assert_eq!(select_decode_worker(&workers, 512, &config, &mut rng), Some(1));
+    }
 }
 
 #[test]
@@ -363,6 +490,8 @@ fn registry_keeps_length_policies_and_kv_affinity() {
         spill_rel: 1.5,
         worker_buckets: HashMap::from([("http://short:8000".to_string(), 0)]),
         tokens_per_byte: 0.25,
+        preference_weight: 2.0,
+        hard_partition: false,
     };
     let decode = PolicyConfig::DecodeKvCost {
         reject_usage: 0.92,
@@ -408,12 +537,17 @@ struct PrefillSim {
 }
 
 fn simulate_prefill(bucketed: bool) -> PrefillSim {
+    // Isolation against long HOL blocking is the property under test, so use
+    // hard partition with a high spill threshold (soft preference intentionally
+    // borrows open capacity earlier and would dilute this contrast).
     let mut config = PrefillBucketConfig {
         bucket_max_tokens: vec![2048],
         spill_abs: 10_000,
         spill_rel: 1.5,
         worker_buckets: HashMap::new(),
         tokens_per_byte: 0.25,
+        preference_weight: 2.0,
+        hard_partition: true,
     };
     if bucketed {
         config.worker_buckets.insert("p0".to_string(), 0);

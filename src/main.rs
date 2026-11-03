@@ -422,13 +422,21 @@ struct CliArgs {
     #[arg(long, value_delimiter = ',')]
     prefill_bucket_max_tokens: Vec<usize>,
 
-    /// In-flight count at which a prefill bucket may spill into the next larger bucket.
+    /// Hard-partition mode only: in-flight count at which a prefill bucket may spill upward.
     #[arg(long, default_value_t = 8)]
     prefill_spill_abs: usize,
 
-    /// A bucket spills only when its lightest worker is this many times busier than the next bucket.
+    /// Hard-partition mode only: spill when the lightest preferred worker is this times busier than the next tier.
     #[arg(long, default_value_t = 1.5)]
     prefill_spill_rel: f32,
+
+    /// Soft mode: load-equivalent cost per tier step away from the preferred bucket (default 2.0).
+    #[arg(long, default_value_t = 2.0)]
+    prefill_preference_weight: f32,
+
+    /// Restore hard spill-threshold partitioning instead of soft length preference.
+    #[arg(long, default_value_t = false)]
+    prefill_hard_partition: bool,
 
     /// Static prefill bucket membership, repeated as `url=index`.
     #[arg(long, action = ArgAction::Append)]
@@ -505,6 +513,8 @@ impl CliArgs {
             spill_rel: self.prefill_spill_rel,
             worker_buckets,
             tokens_per_byte: 0.25,
+            preference_weight: self.prefill_preference_weight,
+            hard_partition: self.prefill_hard_partition,
         }
     }
 
