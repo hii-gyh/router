@@ -201,6 +201,8 @@ impl PolicyRegistry {
             "rendezvous_hash" => Arc::new(RendezvousHashPolicy::new()),
             "prefill_bucket" => super::PolicyFactory::create_by_name("prefill_bucket")
                 .expect("prefill_bucket policy"),
+            "soft_length_aware" => super::PolicyFactory::create_by_name("soft_length_aware")
+                .expect("soft_length_aware policy"),
             "decode_kv_cost" => super::PolicyFactory::create_by_name("decode_kv_cost")
                 .expect("decode_kv_cost policy"),
             _ => {

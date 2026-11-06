@@ -815,6 +815,26 @@ pub enum PolicyConfig {
         hard_partition: bool,
     },
 
+    /// Shared-pool soft length affinity for prefill (no hard buckets).
+    #[serde(rename = "soft_length_aware")]
+    SoftLengthAware {
+        #[serde(default = "default_length_load_weight")]
+        load_weight: f32,
+        #[serde(default = "default_length_mismatch_weight")]
+        mismatch_weight: f32,
+        #[serde(default = "default_tokens_per_byte")]
+        tokens_per_byte: f64,
+        #[serde(default = "default_length_ewma_alpha")]
+        ewma_alpha: f32,
+        #[serde(default = "default_length_balance_abs")]
+        balance_abs_threshold: usize,
+        #[serde(default = "default_length_balance_rel")]
+        balance_rel_threshold: f32,
+        /// Optional static preferred prompt lengths keyed by worker URL.
+        #[serde(default)]
+        preferred_input_tokens: HashMap<String, usize>,
+    },
+
     /// Decode selection from KV usage, running/waiting depth, and incoming length.
     #[serde(rename = "decode_kv_cost")]
     DecodeKvCost {
@@ -870,6 +890,7 @@ impl PolicyConfig {
             PolicyConfig::ConsistentHash { .. } => "consistent_hash",
             PolicyConfig::RendezvousHash => "rendezvous_hash",
             PolicyConfig::PrefillBucket { .. } => "prefill_bucket",
+            PolicyConfig::SoftLengthAware { .. } => "soft_length_aware",
             PolicyConfig::DecodeKvCost { .. } => "decode_kv_cost",
         }
     }
@@ -889,6 +910,26 @@ fn default_prefill_spill_rel() -> f32 {
 
 fn default_prefill_preference_weight() -> f32 {
     2.0
+}
+
+fn default_length_load_weight() -> f32 {
+    1.0
+}
+
+fn default_length_mismatch_weight() -> f32 {
+    0.75
+}
+
+fn default_length_ewma_alpha() -> f32 {
+    0.2
+}
+
+fn default_length_balance_abs() -> usize {
+    32
+}
+
+fn default_length_balance_rel() -> f32 {
+    1.1
 }
 
 fn default_tokens_per_byte() -> f64 {

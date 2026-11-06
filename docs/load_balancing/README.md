@@ -15,6 +15,8 @@ the policy is the same for `grpc://host:port`.
 | `power_of_two` | Load-sensitive workloads | No | Yes |
 | `cache_aware` | Prefix caching optimization | Yes (cache-based) | Yes |
 | `kv_aware` | KV reuse and stage-aware load scoring | No | Yes |
+| `soft_length_aware` | Heterogeneous prefill lengths (shared pool) | No | Yes |
+| `prefill_bucket` | Length-tiered prefill configs (hard/soft tiers) | Optional | Yes |
 
 ---
 
@@ -278,6 +280,36 @@ Send the same `x-session-id` header or `session_params.session_id` on each turn;
 In P/D mode, affinity applies only to decode. A busy decoder may be replaced by a less busy one; prefill is selected independently for each request.
 
 Multiple router replicas need ingress stickiness to preserve affinity.
+
+---
+
+## Soft Length Aware (Prefill)
+
+`soft_length_aware` keeps **one shared prefill pool** and scores workers by load plus
+log-space prompt/preference mismatch. When the pool is imbalanced, the mismatch term
+is disabled and selection falls back to least-loaded. Prefer this over hard length
+buckets when replicas are heterogeneous but still share capacity.
+
+```bash
+vllm-router --vllm-pd-disaggregation \
+  --prefill-policy soft_length_aware \
+  --decode-policy kv_aware \
+  --length-load-weight 1.0 \
+  --length-mismatch-weight 0.75 \
+  --length-chars-per-token 4.0 \
+  --length-ewma-alpha 0.2 \
+  --balance-abs-threshold 32 \
+  --balance-rel-threshold 1.1 \
+  --length-preferred-worker http://p-short:8000=4096 \
+  --length-preferred-worker http://p-long:8000=30000 \
+  --prefill http://p-short:8000 --prefill http://p-long:8000 \
+  --decode http://decode:8000
+```
+
+Send `X-Prompt-Tokens` (or `X-Input-Tokens`) when known. Workers may also advertise
+`preferred_input_tokens` labels; otherwise an EWMA of assigned lengths is used.
+
+Device-free pre-eval: `cargo test --features cpu,ready --test soft_length_aware_sim`.
 
 ---
 

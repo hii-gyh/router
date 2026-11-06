@@ -453,6 +453,59 @@ impl ConfigValidator {
             PolicyConfig::RendezvousHash => {
                 // No specific validation needed
             }
+            PolicyConfig::SoftLengthAware {
+                load_weight,
+                mismatch_weight,
+                tokens_per_byte,
+                ewma_alpha,
+                balance_abs_threshold: _,
+                balance_rel_threshold,
+                preferred_input_tokens,
+            } => {
+                for (name, value) in [
+                    ("load_weight", *load_weight),
+                    ("mismatch_weight", *mismatch_weight),
+                ] {
+                    if !value.is_finite() || value < 0.0 {
+                        return Err(ConfigError::InvalidValue {
+                            field: name.to_string(),
+                            value: value.to_string(),
+                            reason: "Must be finite and >= 0".to_string(),
+                        });
+                    }
+                }
+                if !ewma_alpha.is_finite() || *ewma_alpha < 0.0 || *ewma_alpha > 1.0 {
+                    return Err(ConfigError::InvalidValue {
+                        field: "ewma_alpha".to_string(),
+                        value: ewma_alpha.to_string(),
+                        reason: "Must be finite and in [0, 1]".to_string(),
+                    });
+                }
+                if *balance_rel_threshold < 1.0 {
+                    return Err(ConfigError::InvalidValue {
+                        field: "balance_rel_threshold".to_string(),
+                        value: balance_rel_threshold.to_string(),
+                        reason: "Must be >= 1.0".to_string(),
+                    });
+                }
+                if !tokens_per_byte.is_finite() || *tokens_per_byte <= 0.0 {
+                    return Err(ConfigError::InvalidValue {
+                        field: "tokens_per_byte".to_string(),
+                        value: tokens_per_byte.to_string(),
+                        reason: "Must be finite and > 0".to_string(),
+                    });
+                }
+                if let Some((url, tokens)) = preferred_input_tokens
+                    .iter()
+                    .find(|(_, tokens)| **tokens == 0)
+                {
+                    return Err(ConfigError::InvalidValue {
+                        field: "preferred_input_tokens".to_string(),
+                        value: format!("{url}={tokens}"),
+                        reason: "Preferred length must be > 0".to_string(),
+                    });
+                }
+            }
             PolicyConfig::PrefillBucket {
                 bucket_max_tokens,
                 spill_abs: _,

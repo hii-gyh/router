@@ -16,6 +16,9 @@ pub(crate) fn prompt_tokens(
     if let Some(tokens) = header_usize(headers, "x-prompt-tokens") {
         return tokens.max(1);
     }
+    if let Some(tokens) = header_usize(headers, "x-input-tokens") {
+        return tokens.max(1);
+    }
     let bytes = request_text.map(prompt_bytes).unwrap_or(0);
     let scaled = (bytes as f64 * tokens_per_byte).ceil() as usize;
     scaled.max(1)

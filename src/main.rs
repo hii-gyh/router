@@ -120,7 +120,7 @@ struct CliArgs {
     worker_urls: Vec<String>,
 
     /// Load balancing policy to use. kv_aware uses stage-specific load profiles in PD mode.
-    #[arg(long, default_value = "cache_aware", value_parser = ["random", "round_robin", "cache_aware", "kv_aware", "power_of_two", "consistent_hash", "rendezvous_hash", "prefill_bucket", "decode_kv_cost"])]
+    #[arg(long, default_value = "cache_aware", value_parser = ["random", "round_robin", "cache_aware", "kv_aware", "power_of_two", "consistent_hash", "rendezvous_hash", "prefill_bucket", "soft_length_aware", "decode_kv_cost"])]
     policy: String,
 
     /// Enable Program-level scheduling independently of the request-level
@@ -159,11 +159,11 @@ struct CliArgs {
     pd_kv_events: Vec<String>,
 
     /// Specific policy for prefill nodes in PD mode. kv_aware uses the prefill load profile.
-    #[arg(long, value_parser = ["random", "round_robin", "cache_aware", "kv_aware", "power_of_two", "consistent_hash", "rendezvous_hash", "prefill_bucket", "decode_kv_cost"])]
+    #[arg(long, value_parser = ["random", "round_robin", "cache_aware", "kv_aware", "power_of_two", "consistent_hash", "rendezvous_hash", "prefill_bucket", "soft_length_aware", "decode_kv_cost"])]
     prefill_policy: Option<String>,
 
     /// Specific policy for decode nodes in PD mode (defaults to --policy).
-    #[arg(long, value_parser = ["random", "round_robin", "cache_aware", "kv_aware", "power_of_two", "consistent_hash", "rendezvous_hash", "prefill_bucket", "decode_kv_cost"])]
+    #[arg(long, value_parser = ["random", "round_robin", "cache_aware", "kv_aware", "power_of_two", "consistent_hash", "rendezvous_hash", "prefill_bucket", "soft_length_aware", "decode_kv_cost"])]
     decode_policy: Option<String>,
 
     /// Timeout in seconds for worker startup
@@ -442,6 +442,26 @@ struct CliArgs {
     #[arg(long, action = ArgAction::Append)]
     prefill_bucket_worker: Vec<String>,
 
+    /// soft_length_aware: weight on normalized in-flight load.
+    #[arg(long, default_value_t = 1.0)]
+    length_load_weight: f32,
+
+    /// soft_length_aware: weight on log2 prompt/preference mismatch.
+    #[arg(long, default_value_t = 0.75)]
+    length_mismatch_weight: f32,
+
+    /// soft_length_aware: chars per token when estimating prompt length from the body.
+    #[arg(long, default_value_t = 4.0)]
+    length_chars_per_token: f64,
+
+    /// soft_length_aware: EWMA alpha for online preferred length (0..1).
+    #[arg(long, default_value_t = 0.2)]
+    length_ewma_alpha: f32,
+
+    /// soft_length_aware: static preferred lengths, repeated as `url=tokens`.
+    #[arg(long, action = ArgAction::Append)]
+    length_preferred_worker: Vec<String>,
+
     /// KV connector type for PD disaggregation (nixl or mooncake)
     #[arg(long, value_enum, default_value_t = KvConnector::Nixl)]
     kv_connector: KvConnector,
@@ -488,8 +508,34 @@ impl CliArgs {
             },
             "rendezvous_hash" => PolicyConfig::RendezvousHash,
             "prefill_bucket" => self.prefill_bucket_policy(),
+            "soft_length_aware" => self.soft_length_aware_policy(),
             "decode_kv_cost" => self.decode_kv_cost_policy(),
             _ => PolicyConfig::RoundRobin, // Fallback
+        }
+    }
+
+    fn soft_length_aware_policy(&self) -> PolicyConfig {
+        let mut preferred_input_tokens = HashMap::new();
+        for item in &self.length_preferred_worker {
+            if let Some((url, tokens)) = item.split_once('=') {
+                if let Ok(tokens) = tokens.parse::<usize>() {
+                    preferred_input_tokens.insert(url.to_string(), tokens);
+                }
+            }
+        }
+        let chars = if self.length_chars_per_token > 0.0 {
+            self.length_chars_per_token
+        } else {
+            4.0
+        };
+        PolicyConfig::SoftLengthAware {
+            load_weight: self.length_load_weight,
+            mismatch_weight: self.length_mismatch_weight,
+            tokens_per_byte: 1.0 / chars,
+            ewma_alpha: self.length_ewma_alpha,
+            balance_abs_threshold: self.balance_abs_threshold,
+            balance_rel_threshold: self.balance_rel_threshold,
+            preferred_input_tokens,
         }
     }
 
@@ -976,6 +1022,79 @@ mod tests {
         let (prefill, other) = split_prefill_args_from_others(raw).unwrap();
         let args = CliArgs::try_parse_from(other).unwrap();
         (prefill, args)
+    }
+
+    #[test]
+    fn parses_soft_length_aware_prefill_policy() {
+        let raw = vec![
+            "vllm-router",
+            "--vllm-pd-disaggregation",
+            "--prefill",
+            "http://10.0.0.1:18001",
+            "--prefill",
+            "http://10.0.0.1:18003",
+            "--decode",
+            "http://10.0.0.1:18011",
+            "--prefill-policy",
+            "soft_length_aware",
+            "--decode-policy",
+            "round_robin",
+            "--length-load-weight",
+            "1.0",
+            "--length-mismatch-weight",
+            "0.75",
+            "--length-chars-per-token",
+            "4.0",
+            "--length-ewma-alpha",
+            "0.2",
+            "--balance-abs-threshold",
+            "32",
+            "--balance-rel-threshold",
+            "1.1",
+            "--length-preferred-worker",
+            "http://10.0.0.1:18001=4096",
+            "--length-preferred-worker",
+            "http://10.0.0.1:18003=30000",
+        ]
+        .into_iter()
+        .map(str::to_string)
+        .collect::<Vec<_>>();
+        let (prefill, other) = split_prefill_args_from_others(raw).unwrap();
+        let args = CliArgs::try_parse_from(other).unwrap();
+        let config = args.to_router_config(prefill).unwrap();
+        config.validate().expect("soft_length_aware config");
+        match &config.mode {
+            RoutingMode::VllmPrefillDecode {
+                prefill_policy, ..
+            } => match prefill_policy.as_ref().unwrap() {
+                PolicyConfig::SoftLengthAware {
+                    load_weight,
+                    mismatch_weight,
+                    tokens_per_byte,
+                    ewma_alpha,
+                    balance_abs_threshold,
+                    balance_rel_threshold,
+                    preferred_input_tokens,
+                } => {
+                    assert!((*load_weight - 1.0).abs() < f32::EPSILON);
+                    assert!((*mismatch_weight - 0.75).abs() < f32::EPSILON);
+                    assert!((*tokens_per_byte - 0.25).abs() < 1e-9);
+                    assert!((*ewma_alpha - 0.2).abs() < f32::EPSILON);
+                    assert_eq!(*balance_abs_threshold, 32);
+                    assert!((*balance_rel_threshold - 1.1).abs() < f32::EPSILON);
+                    assert_eq!(
+                        preferred_input_tokens.get("http://10.0.0.1:18001"),
+                        Some(&4096)
+                    );
+                    assert_eq!(
+                        preferred_input_tokens.get("http://10.0.0.1:18003"),
+                        Some(&30000)
+                    );
+                }
+                other => panic!("prefill policy was {other:?}"),
+            },
+            other => panic!("mode was {other:?}"),
+        }
     }
 
     #[test]

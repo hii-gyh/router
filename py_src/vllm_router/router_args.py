@@ -169,6 +169,9 @@ class RouterArgs:
                 "kv_aware",
                 "power_of_two",
                 "consistent_hash",
+                "prefill_bucket",
+                "soft_length_aware",
+                "decode_kv_cost",
             ],
             help="Load balancing policy to use. In PD mode, prefill and decode inherit this policy unless overridden",
         )
@@ -183,6 +186,9 @@ class RouterArgs:
                 "kv_aware",
                 "power_of_two",
                 "consistent_hash",
+                "prefill_bucket",
+                "soft_length_aware",
+                "decode_kv_cost",
             ],
             help="Specific policy for prefill nodes in PD mode. If not specified, uses the main policy",
         )
@@ -197,6 +203,9 @@ class RouterArgs:
                 "kv_aware",
                 "power_of_two",
                 "consistent_hash",
+                "prefill_bucket",
+                "soft_length_aware",
+                "decode_kv_cost",
             ],
             help="Specific policy for decode nodes in PD mode. Defaults to --policy",
         )
@@ -324,6 +333,36 @@ class RouterArgs:
             type=float,
             default=RouterArgs.balance_rel_threshold,
             help="Load balancing is triggered when (max_load - min_load) > abs_threshold AND max_load > min_load * rel_threshold. Otherwise, use cache aware",
+        )
+        parser.add_argument(
+            f"--{prefix}length-load-weight",
+            type=float,
+            default=1.0,
+            help="soft_length_aware: weight on in-flight load",
+        )
+        parser.add_argument(
+            f"--{prefix}length-mismatch-weight",
+            type=float,
+            default=0.75,
+            help="soft_length_aware: weight on log2 prompt/preference mismatch",
+        )
+        parser.add_argument(
+            f"--{prefix}length-chars-per-token",
+            type=float,
+            default=4.0,
+            help="soft_length_aware: chars per token when estimating prompt length",
+        )
+        parser.add_argument(
+            f"--{prefix}length-ewma-alpha",
+            type=float,
+            default=0.2,
+            help="soft_length_aware: EWMA alpha for online preferred length",
+        )
+        parser.add_argument(
+            f"--{prefix}length-preferred-worker",
+            action="append",
+            default=[],
+            help="soft_length_aware: static preferred length as url=tokens (repeatable)",
         )
         parser.add_argument(
             f"--{prefix}eviction-interval-secs",

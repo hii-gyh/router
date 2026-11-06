@@ -4,7 +4,7 @@ use super::{
     CacheAwareConfig, CacheAwarePolicy, ConsistentHashPolicy, CostParams, DecodeKvCostConfig,
     DecodeKvCostPolicy, KvAffinityTable, KvAwarePolicy, LoadBalancingPolicy, PowerOfTwoPolicy,
     PrefillBucketConfig, PrefillBucketPolicy, RandomPolicy, RendezvousHashPolicy, RoundRobinPolicy,
-    TransferCredits,
+    SoftLengthAwareConfig, SoftLengthAwarePolicy, TransferCredits,
 };
 use crate::config::PolicyConfig;
 use std::sync::Arc;
@@ -89,6 +89,23 @@ impl PolicyFactory {
                 preference_weight: *preference_weight,
                 hard_partition: *hard_partition,
             })),
+            PolicyConfig::SoftLengthAware {
+                load_weight,
+                mismatch_weight,
+                tokens_per_byte,
+                ewma_alpha,
+                balance_abs_threshold,
+                balance_rel_threshold,
+                preferred_input_tokens,
+            } => Arc::new(SoftLengthAwarePolicy::new(SoftLengthAwareConfig {
+                load_weight: *load_weight,
+                mismatch_weight: *mismatch_weight,
+                tokens_per_byte: *tokens_per_byte,
+                ewma_alpha: *ewma_alpha,
+                balance_abs_threshold: *balance_abs_threshold,
+                balance_rel_threshold: *balance_rel_threshold,
+                preferred_input_tokens: preferred_input_tokens.clone(),
+            })),
             PolicyConfig::DecodeKvCost {
                 reject_usage,
                 reject_waiting,
@@ -131,6 +148,9 @@ impl PolicyFactory {
             "rendezvous_hash" | "rendezvoushash" => Some(Arc::new(RendezvousHashPolicy::new())),
             "prefill_bucket" | "prefillbucket" => Some(Arc::new(PrefillBucketPolicy::new(
                 PrefillBucketConfig::default(),
+            ))),
+            "soft_length_aware" | "softlengthaware" => Some(Arc::new(SoftLengthAwarePolicy::new(
+                SoftLengthAwareConfig::default(),
             ))),
             "decode_kv_cost" | "decodekvcost" => Some(Arc::new(DecodeKvCostPolicy::new(
                 DecodeKvCostConfig::default(),

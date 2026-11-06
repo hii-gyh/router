@@ -21,6 +21,7 @@ mod random;
 mod registry;
 mod rendezvous_hash;
 mod round_robin;
+mod soft_length_aware;
 
 pub(crate) use cache_aware::PreparedCacheSelection;
 pub use cache_aware::{CacheAwareCandidate, CacheAwarePlacement, CacheAwarePolicy};
@@ -43,6 +44,10 @@ pub use prefill_bucket::{
     select_prefill_worker, PrefillBucketConfig, PrefillBucketPolicy, PrefillWorkerView,
 };
 pub use random::RandomPolicy;
+pub use soft_length_aware::{
+    length_mismatch, pool_imbalanced, select_soft_length_worker, SoftLengthAwareConfig,
+    SoftLengthAwarePolicy, SoftLengthWorkerView,
+};
 pub use registry::PolicyRegistry;
 pub use rendezvous_hash::RendezvousHashPolicy;
 pub use round_robin::RoundRobinPolicy;

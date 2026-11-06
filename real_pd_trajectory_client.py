@@ -455,6 +455,106 @@ def synthesize_fixed_trajectory(n=200, seed=20251103, prompt_tokens=2048, max_to
     }
 
 
+def synthesize_mixed_aprefill_trajectory(n=400, seed=20251103):
+    """Weighted mix of fixed (p,o) cells for A_prefill vs A0 mixed-load search.
+
+    Nominal cells: 4k/1k, 7k/2k, 16k/2k, 512/8k.
+    16k/2k is clamped to SAFE_OPEN_CTX (max_model_len 16384 − CTX_HEADROOM):
+      prompt=14080, out=2048  (14080+2048=16128).
+    Slightly long-biased fractions: 0.20 / 0.25 / 0.30 / 0.25.
+    """
+    rng = random.Random(seed)
+    budget = SAFE_OPEN_CTX
+    # nominal → actual. For 16k/2k prefer KEEP out=2048 and shrink prompt
+    # (generic _clamp_prompt_out would shrink out to 16 when prompt≈budget).
+    specs = [
+        {"name": "4k_1k", "prompt": 4096, "out": 1024, "frac": 0.20},
+        {"name": "7k_2k", "prompt": 7168, "out": 2048, "frac": 0.25},
+        {"name": "16k_2k", "prompt": 16384, "out": 2048, "frac": 0.30},
+        {"name": "512_8k", "prompt": 512, "out": 8192, "frac": 0.25},
+    ]
+    cells = []
+    for s in specs:
+        p, o = int(s["prompt"]), int(s["out"])
+        if p + o > budget:
+            # Prefer preserving requested decode length for this mix cell.
+            if o < budget - 16:
+                p = budget - o
+            else:
+                clamped = _clamp_prompt_out(p, o, budget, min_out=16)
+                if clamped is None:
+                    raise ValueError(f"cell {s['name']} cannot fit SAFE_OPEN_CTX={budget}")
+                p, o = clamped
+        if p + o > budget:
+            raise ValueError(f"cell {s['name']} still overflows after clamp: {p}+{o}>{budget}")
+        cells.append(
+            {
+                **s,
+                "prompt_actual": p,
+                "out_actual": o,
+                "clamped": (p != s["prompt"] or o != s["out"]),
+            }
+        )
+    rows = []
+    t = 0.0
+    counts = {c["name"]: 0 for c in cells}
+    for i in range(n):
+        u = rng.random()
+        acc = 0.0
+        chosen = cells[-1]
+        for c in cells:
+            acc += c["frac"]
+            if u <= acc:
+                chosen = c
+                break
+        counts[chosen["name"]] += 1
+        t += rng.expovariate(1.0)
+        p, o = chosen["prompt_actual"], chosen["out_actual"]
+        kind = "short" if p <= 2048 else "long"
+        rows.append(
+            {
+                "id": f"mix-{chosen['name']}-{i}",
+                "prompt_tokens_target": p,
+                "max_tokens": o,
+                "arrival_offset_s": t,
+                "kind": kind,
+                "cell": chosen["name"],
+                "source": f"synthetic_mixed_aprefill_seed_{seed}",
+            }
+        )
+    return {
+        "generator": "synthetic_mixed_aprefill_weighted",
+        "seed": seed,
+        "n_raw": n,
+        "n_kept": len(rows),
+        "safe_open_ctx": budget,
+        "ctx_headroom": CTX_HEADROOM,
+        "max_model_len": MAX_CTX,
+        "mix_fractions_nominal": {c["name"]: c["frac"] for c in cells},
+        "mix_counts": counts,
+        "cells": [
+            {
+                "name": c["name"],
+                "nominal_prompt": c["prompt"],
+                "nominal_out": c["out"],
+                "actual_prompt": c["prompt_actual"],
+                "actual_out": c["out_actual"],
+                "frac": c["frac"],
+                "clamped": c["clamped"],
+            }
+            for c in cells
+        ],
+        "requests": rows,
+        "recommend_ignore_eos": True,
+        "notes": (
+            "Slightly long-biased mix of 4k/1k, 7k/2k, 16k/2k(clamped), 512/8k. "
+            f"16k/2k → prompt={next(c['prompt_actual'] for c in cells if c['name']=='16k_2k')} "
+            f"out={next(c['out_actual'] for c in cells if c['name']=='16k_2k')} "
+            f"(SAFE_OPEN_CTX={budget}=max_model_len {MAX_CTX}-headroom {CTX_HEADROOM})."
+        ),
+    }
+
+
 def try_load_sharegpt(path: Path, n=800, seed=20251031):
     if not path.exists():
         return None
@@ -834,7 +934,15 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument(
         "--mode",
-        choices=["prepare", "prepare-high-kv", "prepare-fixed", "warmup", "run", "idle"],
+        choices=[
+            "prepare",
+            "prepare-high-kv",
+            "prepare-fixed",
+            "prepare-mixed-aprefill",
+            "warmup",
+            "run",
+            "idle",
+        ],
         required=True,
     )
     ap.add_argument("--traj", default="/root/gyh_dev/vllm_router/data/trajectory.json")
@@ -860,7 +968,12 @@ def main():
         print(json.dumps({"idle": ok, "metrics": m}, ensure_ascii=False))
         return
 
-    if args.mode in ("prepare", "prepare-high-kv", "prepare-fixed"):
+    if args.mode in (
+        "prepare",
+        "prepare-high-kv",
+        "prepare-fixed",
+        "prepare-mixed-aprefill",
+    ):
         Path(args.traj).parent.mkdir(parents=True, exist_ok=True)
         if args.mode == "prepare-high-kv":
             traj = synthesize_high_kv_trajectory(n=1200, seed=args.seed)
@@ -870,6 +983,10 @@ def main():
                 seed=args.seed,
                 prompt_tokens=args.prompt_tokens,
                 max_tokens=args.max_tokens,
+            )
+        elif args.mode == "prepare-mixed-aprefill":
+            traj = synthesize_mixed_aprefill_trajectory(
+                n=max(args.n * 4, 400), seed=args.seed
             )
         else:
             traj = try_load_sharegpt(Path(args.sharegpt), n=1200, seed=args.seed)
