@@ -1,0 +1,142 @@
+{
+  "label": "SoftPlusDecode",
+  "rate_rps": 1.5,
+  "n_submitted": 40,
+  "n_ok": 40,
+  "n_err": 0,
+  "error_rate": 0.0,
+  "wall_s": 39.067,
+  "output_tok_total": 10755.0,
+  "output_tok_s": 275.294,
+  "ttft_p50": 0.18791795521974564,
+  "ttft_p90": 0.2065586093813181,
+  "tpot_p50": 0.019686853943733117,
+  "tpot_p90": 0.02002840621732232,
+  "buckets": {
+    "short_le_2048": {
+      "n": 36,
+      "ttft_p50": 0.18747679982334375,
+      "ttft_p90": 0.20316331647336483,
+      "out_tokens": 9536
+    },
+    "long_gt_2048": {
+      "n": 4,
+      "ttft_p50": 0.22793786227703094,
+      "ttft_p90": 0.2534839063882828,
+      "out_tokens": 1361
+    }
+  },
+  "prefill_prompt_delta": {
+    "short_pool": 10724.0,
+    "open_pool": 23456.0,
+    "per_worker": {
+      "18001": 5283.0,
+      "18002": 5441.0,
+      "18003": 7607.0,
+      "18004": 15849.0
+    }
+  },
+  "decode_kv": {
+    "n_samples": 75,
+    "kv_peak": {
+      "18011": 0.0149,
+      "18012": 0.0195,
+      "18013": 0.0,
+      "18014": 0.0
+    },
+    "kv_peak_max": 0.0195,
+    "kv_mean_of_max": 0.0093,
+    "kv_p50_of_max": 0.0103,
+    "kv_p90_of_max": 0.0144,
+    "kv_frac_max_ge_0_25": 0.0,
+    "kv_frac_max_ge_0_40": 0.0,
+    "inflight_max_peak": 7.0,
+    "inflight_mean_of_max": 3.24,
+    "inflight_frac_max_ge_4": 0.4667,
+    "kv_stddev_mean": 0.004
+  },
+  "metric_delta": {
+    "18001": {
+      "prompt_tokens": 5283.0,
+      "generation_tokens": 15.0,
+      "running": 0.0,
+      "waiting": 0.0,
+      "kv": 0.0,
+      "external_kv_tokens": 0.0
+    },
+    "18002": {
+      "prompt_tokens": 5441.0,
+      "generation_tokens": 14.0,
+      "running": 0.0,
+      "waiting": 0.0,
+      "kv": 0.0,
+      "external_kv_tokens": 0.0
+    },
+    "18003": {
+      "prompt_tokens": 7607.0,
+      "generation_tokens": 4.0,
+      "running": 0.0,
+      "waiting": 0.0,
+      "kv": 0.0,
+      "external_kv_tokens": 0.0
+    },
+    "18004": {
+      "prompt_tokens": 15849.0,
+      "generation_tokens": 7.0,
+      "running": 0.0,
+      "waiting": 0.0,
+      "kv": 0.0,
+      "external_kv_tokens": 0.0
+    },
+    "18011": {
+      "prompt_tokens": 12888.0,
+      "generation_tokens": 5037.0,
+      "running": 0.0,
+      "waiting": 0.0,
+      "kv": 0.0,
+      "external_kv_tokens": 12888.0
+    },
+    "18012": {
+      "prompt_tokens": 21292.0,
+      "generation_tokens": 5718.0,
+      "running": 0.0,
+      "waiting": 0.0,
+      "kv": 0.0,
+      "external_kv_tokens": 21292.0
+    },
+    "18013": {
+      "prompt_tokens": 0.0,
+      "generation_tokens": 0.0,
+      "running": 0.0,
+      "waiting": 0.0,
+      "kv": 0.0,
+      "external_kv_tokens": 0.0
+    },
+    "18014": {
+      "prompt_tokens": 0.0,
+      "generation_tokens": 0.0,
+      "running": 0.0,
+      "waiting": 0.0,
+      "kv": 0.0,
+      "external_kv_tokens": 0.0
+    }
+  },
+  "errors_sample": [],
+  "success_criteria": {
+    "at": "R_sat",
+    "require": [
+      "experiment.output_tok_s > control.output_tok_s",
+      "experiment.ttft_p90 <= control.ttft_p90"
+    ],
+    "note": "Per-length-bucket regressions stay in the report. SYSTEM output tok/s + TTFT p90 are the headline metrics."
+  },
+  "ignore_eos": true,
+  "kv_transfer_samples": [],
+  "traj_meta": {
+    "generator": "synthetic_sharegptish_lognormal_mixture",
+    "seed": 20251113,
+    "offset": 0,
+    "n": 40,
+    "ignore_eos": true
+  }
+}

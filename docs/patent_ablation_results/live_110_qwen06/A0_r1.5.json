@@ -1,0 +1,156 @@
+{
+  "label": "A0",
+  "rate_rps": 1.5,
+  "n_submitted": 40,
+  "n_ok": 39,
+  "n_err": 1,
+  "error_rate": 0.025,
+  "wall_s": 39.406,
+  "output_tok_total": 10525.0,
+  "output_tok_s": 267.089,
+  "ttft_p50": 0.19893267564475536,
+  "ttft_p90": 5.6065719882026315,
+  "tpot_p50": 0.020192422791387474,
+  "tpot_p90": 0.020428021474471016,
+  "buckets": {
+    "short_le_2048": {
+      "n": 36,
+      "ttft_p50": 0.19883705489337444,
+      "ttft_p90": 7.253511615097523,
+      "out_tokens": 9507
+    },
+    "long_gt_2048": {
+      "n": 3,
+      "ttft_p50": 0.2159997122362256,
+      "ttft_p90": 0.2551820334047079,
+      "out_tokens": 1133
+    }
+  },
+  "prefill_prompt_delta": {
+    "short_pool": 8292.0,
+    "open_pool": 22235.0,
+    "per_worker": {
+      "18001": 4220.0,
+      "18002": 4072.0,
+      "18003": 11308.0,
+      "18004": 10927.0
+    }
+  },
+  "decode_kv": {
+    "n_samples": 75,
+    "kv_peak": {
+      "18011": 0.0171,
+      "18012": 0.022,
+      "18013": 0.0,
+      "18014": 0.0
+    },
+    "kv_peak_max": 0.022,
+    "kv_mean_of_max": 0.0098,
+    "kv_p50_of_max": 0.0114,
+    "kv_p90_of_max": 0.0165,
+    "kv_frac_max_ge_0_25": 0.0,
+    "kv_frac_max_ge_0_40": 0.0,
+    "inflight_max_peak": 9.0,
+    "inflight_mean_of_max": 3.67,
+    "inflight_frac_max_ge_4": 0.5467,
+    "kv_stddev_mean": 0.0043
+  },
+  "metric_delta": {
+    "18001": {
+      "prompt_tokens": 4220.0,
+      "generation_tokens": 9.0,
+      "running": 0.0,
+      "waiting": 0.0,
+      "kv": 0.0,
+      "external_kv_tokens": 0.0
+    },
+    "18002": {
+      "prompt_tokens": 4072.0,
+      "generation_tokens": 10.0,
+      "running": 0.0,
+      "waiting": 0.0,
+      "kv": 0.0,
+      "external_kv_tokens": 0.0
+    },
+    "18003": {
+      "prompt_tokens": 11308.0,
+      "generation_tokens": 10.0,
+      "running": 0.0,
+      "waiting": 0.0,
+      "kv": 0.0,
+      "external_kv_tokens": 0.0
+    },
+    "18004": {
+      "prompt_tokens": 10927.0,
+      "generation_tokens": 10.0,
+      "running": 0.0,
+      "waiting": 0.0,
+      "kv": 0.0,
+      "external_kv_tokens": 0.0
+    },
+    "18011": {
+      "prompt_tokens": 15528.0,
+      "generation_tokens": 5133.0,
+      "running": 0.0,
+      "waiting": 0.0,
+      "kv": 0.0,
+      "external_kv_tokens": 15528.0
+    },
+    "18012": {
+      "prompt_tokens": 14999.0,
+      "generation_tokens": 5392.0,
+      "running": 0.0,
+      "waiting": 0.0,
+      "kv": 0.0,
+      "external_kv_tokens": 14999.0
+    },
+    "18013": {
+      "prompt_tokens": 0.0,
+      "generation_tokens": 0.0,
+      "running": 0.0,
+      "waiting": 0.0,
+      "kv": 0.0,
+      "external_kv_tokens": 0.0
+    },
+    "18014": {
+      "prompt_tokens": 0.0,
+      "generation_tokens": 0.0,
+      "running": 0.0,
+      "waiting": 0.0,
+      "kv": 0.0,
+      "external_kv_tokens": 0.0
+    }
+  },
+  "errors_sample": [
+    {
+      "id": "syn-4",
+      "bucket": "long",
+      "prompt_tokens": 3645,
+      "max_tokens": 230,
+      "status": 0,
+      "ttft": null,
+      "e2e": 0.013134638778865337,
+      "tpot": null,
+      "out_tokens": 0,
+      "error": "HTTPError:HTTP Error 400: Bad Request",
+      "ok": false
+    }
+  ],
+  "success_criteria": {
+    "at": "R_sat",
+    "require": [
+      "experiment.output_tok_s > control.output_tok_s",
+      "experiment.ttft_p90 <= control.ttft_p90"
+    ],
+    "note": "Per-length-bucket regressions stay in the report. SYSTEM output tok/s + TTFT p90 are the headline metrics."
+  },
+  "ignore_eos": true,
+  "kv_transfer_samples": [],
+  "traj_meta": {
+    "generator": "synthetic_sharegptish_lognormal_mixture",
+    "seed": 20251113,
+    "offset": 0,
+    "n": 40,
+    "ignore_eos": true
+  }
+}

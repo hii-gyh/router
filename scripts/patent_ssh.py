@@ -85,20 +85,36 @@ def cmd_run(host: str, command: str) -> None:
     print(_ssh_run(host, command))
 
 
+def _upload_bytes(host: str, data: bytes, remote_path: str, timeout: int = 600) -> str:
+    b64 = base64.b64encode(data).decode("ascii")
+    chunk_size = 12000
+    chunks = [b64[i : i + chunk_size] for i in range(0, len(b64), chunk_size)]
+    remote_b64 = remote_path + ".b64"
+    logs = [_ssh_run(host, f"rm -f {remote_b64} {remote_path}; touch {remote_b64}", timeout=60)]
+    for idx, chunk in enumerate(chunks):
+        # Append one chunk per SSH call to avoid ARG_MAX.
+        cmd = f"printf '%s' '{chunk}' >> {remote_b64}"
+        logs.append(_ssh_run(host, cmd, timeout=120))
+        if idx % 20 == 0 or idx == len(chunks) - 1:
+            logs.append(f"progress {idx + 1}/{len(chunks)}")
+    decode = (
+        f"python3 -c \"import base64; open({remote_path!r},'wb').write("
+        f"base64.b64decode(open({remote_b64!r},'rb').read())); "
+        f"import os; print('wrote', {remote_path!r}, os.path.getsize({remote_path!r}))\""
+    )
+    logs.append(_ssh_run(host, decode, timeout=timeout))
+    return "\n".join(x for x in logs if x)
+
+
 def cmd_upload_run(host: str, local_path: str, remote_path: str) -> None:
     data = open(local_path, "rb").read()
-    b64 = base64.b64encode(data).decode("ascii")
-    # Chunk to keep argv reasonable.
-    chunks = [b64[i : i + 4000] for i in range(0, len(b64), 4000)]
-    parts = [f"open('{remote_path}','wb').write(__import__('base64').b64decode(''"]
-    # Build remote python that concatenates chunks.
-    py = [
-        "import base64",
-        f"chunks={chunks!r}",
-        f"open({remote_path!r},'wb').write(base64.b64decode(''.join(chunks)))",
-    ]
-    remote = "python3 -c " + repr("; ".join(py)) + f" && chmod +x {remote_path} && bash {remote_path}"
-    print(_ssh_run(host, remote, timeout=600))
+    print(_upload_bytes(host, data, remote_path))
+    print(_ssh_run(host, f"chmod +x {remote_path} && bash {remote_path}", timeout=600))
+
+
+def cmd_upload(host: str, local_path: str, remote_path: str) -> None:
+    data = open(local_path, "rb").read()
+    print(_upload_bytes(host, data, remote_path, timeout=900))
 
 
 def main() -> None:
@@ -106,7 +122,8 @@ def main() -> None:
         raise SystemExit(
             "usage:\n"
             "  patent_ssh.py run HOST 'cmd'\n"
-            "  patent_ssh.py upload-run HOST LOCAL_SCRIPT [REMOTE_PATH]"
+            "  patent_ssh.py upload-run HOST LOCAL_SCRIPT [REMOTE_PATH]\n"
+            "  patent_ssh.py upload HOST LOCAL_FILE REMOTE_PATH"
         )
     mode = sys.argv[1]
     host = sys.argv[2]
@@ -116,6 +133,8 @@ def main() -> None:
         local = sys.argv[3]
         remote = sys.argv[4] if len(sys.argv) > 4 else "/tmp/patent_cmd.sh"
         cmd_upload_run(host, local, remote)
+    elif mode == "upload":
+        cmd_upload(host, sys.argv[3], sys.argv[4])
     else:
         raise SystemExit(f"unknown mode {mode}")
 

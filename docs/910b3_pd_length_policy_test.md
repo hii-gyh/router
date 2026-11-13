@@ -1,5 +1,7 @@
 # 910B3 上测试 prefill 分桶和 decode 代价选路
 
+远端实验室主机、SSH、一键脚本与踩坑清单见 [agent_remote_patent_live.md](agent_remote_patent_live.md)（供其他 agent 复用）。
+
 这份说明用来在昇腾 910B3 上比较两套 router 配置：
 
 - 对照：P 和 D 都用 `round_robin`

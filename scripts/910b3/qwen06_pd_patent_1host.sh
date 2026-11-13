@@ -79,6 +79,7 @@ mount_args() {
 }
 
 stop_all() {
+  stop_router
   local names
   names="$(nerdctl ps -a --format '{{.Names}}' | grep -E '^pd-pat-' || true)"
   if [[ -n "$names" ]]; then
@@ -196,50 +197,88 @@ router_args_for_arm() {
   printf '%s\n' "${args[@]}"
 }
 
+stop_router() {
+  # Host-native router (binary links host OpenSSL 1.1; container image lacks it).
+  if [[ -f "$LOG_DIR/router.pid" ]]; then
+    local pid
+    pid="$(cat "$LOG_DIR/router.pid" 2>/dev/null || true)"
+    if [[ -n "${pid:-}" ]] && kill -0 "$pid" 2>/dev/null; then
+      kill "$pid" 2>/dev/null || true
+      sleep 1
+      kill -9 "$pid" 2>/dev/null || true
+    fi
+    rm -f "$LOG_DIR/router.pid"
+  fi
+  pkill -f '/vllm-router --host 0.0.0.0 --port 8090' 2>/dev/null || true
+  nerdctl rm -f pd-pat-router >/dev/null 2>&1 || true
+  fuser -k 8090/tcp >/dev/null 2>&1 || true
+}
+
 start_router_arm() {
   local arm="${1:-SoftPlusDecode}"
   [[ -x "$ROUTER_BIN" ]] || { echo "missing $ROUTER_BIN"; return 1; }
-  nerdctl rm -f pd-pat-router >/dev/null 2>&1 || true
+  mkdir -p "$LOG_DIR"
+  stop_router
   local -a args=()
   mapfile -t args < <(router_args_for_arm "$arm")
-  nerdctl run -d --name pd-pat-router --net=host -v "$ROOT:$ROOT" "$IMG" "${args[@]}"
+  nohup "${args[@]}" >"$LOG_DIR/router_${arm}.log" 2>&1 &
+  echo $! >"$LOG_DIR/router.pid"
   local i
   for i in $(seq 1 90); do
     curl -sf -m 2 http://127.0.0.1:8090/health >/dev/null 2>&1 && {
-      echo "router ready arm=$arm ${i}s"; return 0; }
+      echo "router ready arm=$arm ${i}s pid=$(cat "$LOG_DIR/router.pid")"; return 0; }
     sleep 1
   done
-  nerdctl logs --tail 60 pd-pat-router 2>&1 | tail -60
+  echo "router failed arm=$arm"; tail -80 "$LOG_DIR/router_${arm}.log" || true
   return 1
 }
 
 status_cmd() {
   echo "=== $(date -Is) ==="
   nerdctl ps -a --format '{{.Names}} {{.Status}}' | grep '^pd-pat-' || true
+  if [[ -f "$LOG_DIR/router.pid" ]] && kill -0 "$(cat "$LOG_DIR/router.pid")" 2>/dev/null; then
+    echo "router pid=$(cat "$LOG_DIR/router.pid") alive"
+  else
+    echo "router host-process absent"
+  fi
   for p in $(worker_ports) 8090; do
     if curl -sf -m 2 "http://127.0.0.1:${p}/health" >/dev/null 2>&1; then echo "$p healthy"
     else echo "$p DOWN"; fi
   done
 }
 
+client_env() {
+  # MODEL_NAME must match --served-model-name; default in client is qwen3.8.
+  printf '%s\n' \
+    -e "TOKENIZER_PATH=$MODEL" \
+    -e "MODEL_NAME=$SERVED_NAME" \
+    -e "ROUTER_URL=http://127.0.0.1:8090/v1/chat/completions" \
+    -e "SHORT_PORTS=18001,18002" \
+    -e "CTX_HEADROOM=128"
+}
+
 prepare_traj() {
   local traj="$ROOT/data/trajectory_patent_live.json"
+  local -a env_args=()
+  mapfile -t env_args < <(client_env)
   nerdctl run --rm --net=host -v "$ROOT:$ROOT" -v /mnt/weights:/home/weights \
-    -e TOKENIZER_PATH="$MODEL" "$IMG" \
+    "${env_args[@]}" "$IMG" \
     python3 "$CLIENT" --mode prepare-mixed --traj "$traj" --seed 20251113 \
       --short-prompt 512 --mid-prompt 1536 --long-prompt 4096 --open-prompt 6144 \
       --n 120 2>/dev/null \
     || nerdctl run --rm --net=host -v "$ROOT:$ROOT" -v /mnt/weights:/home/weights \
-         -e TOKENIZER_PATH="$MODEL" "$IMG" \
+         "${env_args[@]}" "$IMG" \
          python3 "$CLIENT" --mode prepare --traj "$traj" --seed 20251113
   echo "traj=$traj"
 }
 
 run_arm_once() {
   local arm="$1" rate="$2" n="$3" out="$4"
+  local -a env_args=()
+  mapfile -t env_args < <(client_env)
   start_router_arm "$arm"
   nerdctl run --rm --net=host -v "$ROOT:$ROOT" -v /mnt/weights:/home/weights \
-    -e TOKENIZER_PATH="$MODEL" "$IMG" \
+    "${env_args[@]}" "$IMG" \
     python3 "$CLIENT" --mode run --traj "$ROOT/data/trajectory_patent_live.json" \
       --rate "$rate" --n "$n" --label "$arm" --out "$out" --ignore-eos \
     | tee "${out%.json}.log" | tail -30

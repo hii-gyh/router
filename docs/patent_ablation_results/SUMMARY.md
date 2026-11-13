@@ -45,3 +45,16 @@
 3. Handoff fail rate + mean recovery ticks across three arms
 
 CSV companions in this directory can be plotted offline.
+
+## Live retest (Ascend 910B3 host 110, Qwen3-0.6B)
+
+Differentiated Prefill short@2048 / open@8192 + Decode×2. Full write-up: [`live_110_qwen06/SUMMARY.md`](live_110_qwen06/SUMMARY.md). Agent reuse guide: [`../agent_remote_patent_live.md`](../agent_remote_patent_live.md).
+
+| arm | n_ok | err_rate | output_tok_s | ttft_p90 (s) |
+|-----|-----:|---------:|-------------:|-------------:|
+| A0 (RR) | 39 | 0.025 | 267.1 | 5.607 |
+| Hard | 40 | 0.000 | 272.5 | 0.470 |
+| SoftFull | 40 | 0.000 | 276.5 | 0.208 |
+| SoftPlusDecode | 40 | 0.000 | 275.3 | 0.207 |
+
+**Read (live):** On a disclosure-aligned differentiated pool, length-aware Hard/Soft cut TTFT p90 by ~12–27× vs RR and eliminate long→short 400s. SoftFull ≈ SoftPlusDecode at this short load; Decode L_req still relies on sim / heavier Decode pressure.
